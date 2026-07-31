@@ -7,10 +7,13 @@
     "max_tokens": 4096,
     "throttle_sec": 0,
     "analysis_concurrency": 1,
-    "enrichment_concurrency": 1
+    "enrichment_concurrency": 1,
+    "languages": ["en"],
+    "locales": {},
+    "locale_mode": "production"
   },
   "processing": {
-    "profiles_dir": "profiles",
+    "profiles_dir": "../profiles",
     "default_profile": "tech-news"
   },
   "display": {

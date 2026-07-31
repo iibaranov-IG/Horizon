@@ -32,9 +32,19 @@ from src.services.webhook import (
     redact_url,
 )
 from src.ai.summarizer import DailySummarizer
+from src.services.webhook_cli import _make_test_items
 
 _TEST_URL_ENV = "TEST_WEBHOOK_URL"
 _TEST_URL = "https://example.com/webhook"
+
+
+@pytest.fixture(autouse=True)
+def _skip_dns_for_mocked_webhook_requests(monkeypatch):
+    """Keep HTTP unit tests hermetic; SSRF/redirect coverage is in test_url_security.py."""
+    async def allow_mocked_url(url: str) -> str:
+        return url
+
+    monkeypatch.setattr("src.url_security.validate_public_http_url", allow_mocked_url)
 
 
 # ── Template variable replacement ──
@@ -850,6 +860,12 @@ def _make_item(title="Test Item", url="https://example.com/test", score=8.0):
 # ── send_daily_summary ──
 
 
+def test_webhook_cli_samples_have_an_artifact_for_the_requested_language():
+    items = _make_test_items("en")
+
+    assert all(item.processing and "en" in item.processing.artifacts for item in items)
+
+
 class TestSendDailySummary:
     def test_summary_delivery_calls_notify_once(self):
         """delivery='summary' sends a single notify call with message_kind='summary'."""
@@ -1264,6 +1280,70 @@ class TestSendDailySummary:
             overview_vars = mock_notify.call_args_list[0][0][0]
             assert overview_vars["message_title"] == "Horizon 2026-04-24 总览"
         del os.environ[_TEST_URL_ENV]
+
+    def test_russian_webhook_delivery_uses_localized_titles_and_card_text(self):
+        os.environ[_TEST_URL_ENV] = _TEST_URL
+        config = WebhookConfig(
+            enabled=True,
+            url_env=_TEST_URL_ENV,
+            delivery="summary_and_items",
+            platform="feishu",
+            layout="collapsible",
+        )
+        notifier = WebhookNotifier(config)
+        summarizer = DailySummarizer()
+        item = _make_item(title="Новость")
+        item.processing.artifacts["ru"] = ContentArtifact(
+            language="ru", title="Новость", lead="Описание."
+        )
+
+        messages = notifier.build_daily_summary_messages(
+            summary="# Сводка",
+            important_items=[item],
+            all_items_count=1,
+            date="2026-04-24",
+            lang="ru",
+            summarizer=summarizer,
+        )
+
+        assert messages[0]["message_title"] == "Horizon 2026-04-24 Сводка с карточками"
+        elements = messages[0]["_request_body_override"]["card"]["body"]["elements"]
+        assert "Отобрано: 1 важная новость из 1 материала." in elements[0]["content"]
+        assert "Раскройте карточки ниже" in elements[0]["content"]
+        assert "Новость 1 из 1" in elements[-1]["elements"][0]["content"]
+        del os.environ[_TEST_URL_ENV]
+
+    def test_custom_locale_controls_all_feishu_card_strings(self):
+        config = WebhookConfig(platform="feishu", layout="collapsible")
+        notifier = WebhookNotifier(config)
+        summarizer = DailySummarizer(
+            locales={
+                "fr": {
+                    "header": "Horizon : synthèse",
+                    "selected_items": "{selected} sélection sur {total} éléments.",
+                    "empty_analyzed": "Aucun élément retenu sur {total}.",
+                    "empty_body": "Aucune actualité.",
+                    "item_prefix": "Actualité {index}/{total}",
+                    "collapsible_overview_instruction": "Ouvrez les cartes ci-dessous.",
+                    "webhook_collapsible_title": "Horizon {date} — cartes",
+                }
+            }
+        )
+        item = _make_item(title="Nouvelle")
+        item.processing.artifacts["fr"] = ContentArtifact(
+            language="fr", title="Nouvelle", lead="Résumé."
+        )
+
+        messages = notifier.build_daily_summary_messages(
+            summary="", important_items=[item], all_items_count=3,
+            date="2026-04-24", lang="fr", summarizer=summarizer,
+        )
+
+        assert messages[0]["message_title"] == "Horizon 2026-04-24 — cartes"
+        elements = messages[0]["_request_body_override"]["card"]["body"]["elements"]
+        assert "# Horizon : synthèse" in elements[0]["content"]
+        assert "1 sélection sur 3 éléments." in elements[0]["content"]
+        assert "Ouvrez les cartes ci-dessous." in elements[0]["content"]
 
 # ── send_failure_notification ──
 

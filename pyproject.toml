@@ -19,7 +19,7 @@ dependencies = [
     "ddgs>=7.0.0",
     "beautifulsoup4>=4.12.0",
     "markdown>=3.10.2",
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2.0.0",
     "trafilatura>=2.1.0",
 ]
 
@@ -41,6 +41,7 @@ horizon = "src.main:main"
 horizon-mcp = "src.mcp.server:main"
 horizon-wizard = "src.setup.wizard:main"
 horizon-webhook = "src.services.webhook_cli:main"
+horizon-locales = "src.services.locales_cli:main"
 
 [build-system]
 requires = ["hatchling"]

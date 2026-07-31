@@ -61,7 +61,7 @@ Configure discovery in `data/config.json`:
 ```json
 {
   "processing": {
-    "profiles_dir": "profiles",
+    "profiles_dir": "../profiles",
     "default_profile": "tech-news"
   }
 }

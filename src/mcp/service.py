@@ -553,8 +553,19 @@ class HorizonPipelineService:
         total_fetched = self._total_fetched(run_id, fallback=len(items))
         date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+        ai_config = getattr(getattr(ctx, "config", None), "ai", None)
+        if ai_config is not None and language not in ai_config.languages:
+            raise HorizonMcpError(
+                code="HZ_INVALID_INPUT",
+                message=(
+                    "Requested language was not configured for enrichment: "
+                    + language
+                ),
+            )
         summarizer = ctx.runtime.DailySummarizer(
-            profile_names=self._profiles(ctx).names
+            profile_names=self._profiles(ctx).names,
+            locales=getattr(ai_config, "locales", None),
+            strict_locales=getattr(ai_config, "locale_mode", "development") == "production",
         )
         summary = await summarizer.generate_summary(
             items,
@@ -643,6 +654,15 @@ class HorizonPipelineService:
             sources=sources,
         )
         final_languages = languages if languages else list(ctx.config.ai.languages)
+        unsupported_languages = sorted(set(final_languages) - set(ctx.config.ai.languages))
+        if unsupported_languages:
+            raise HorizonMcpError(
+                code="HZ_INVALID_INPUT",
+                message=(
+                    "Requested languages were not configured for enrichment: "
+                    + ", ".join(unsupported_languages)
+                ),
+            )
 
         summaries = []
         for lang in final_languages:
@@ -677,14 +697,25 @@ class HorizonPipelineService:
         resolved_config = resolve_config_path(resolved_horizon, config_path)
         config = load_config(runtime, resolved_config)
         effective_config, selected_sources, unknown_sources = apply_source_filter(config, sources)
+        strict_locales = effective_config.ai.locale_mode == "production"
+        locale_validator = runtime.DailySummarizer(
+            locales=effective_config.ai.locales, strict_locales=strict_locales
+        )
+        for language in effective_config.ai.languages:
+            locale_validator.validate_locale_configuration(language)
 
+        context = PipelineContext(
+            horizon_path=resolved_horizon,
+            config_path=resolved_config,
+            runtime=runtime,
+            config=effective_config,
+        )
+        self._profiles(context).validate_output_languages(
+            effective_config.ai.languages,
+            strict=strict_locales,
+        )
         return (
-            PipelineContext(
-                horizon_path=resolved_horizon,
-                config_path=resolved_config,
-                runtime=runtime,
-                config=effective_config,
-            ),
+            context,
             selected_sources,
             unknown_sources,
         )
@@ -740,7 +771,7 @@ class HorizonPipelineService:
         return ProfileRegistry.load(
             Path(ctx.config.processing.profiles_dir).expanduser(),
             ctx.config.processing.default_profile,
-            base_dir=ctx.horizon_path,
+            base_dir=ctx.config_path.parent,
         )
 
     @staticmethod

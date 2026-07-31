@@ -100,7 +100,12 @@ def main():
         icons = get_icons(config.display.icon_style)
 
         # Create and run orchestrator
-        orchestrator = HorizonOrchestrator(config, storage, console=console)
+        orchestrator = HorizonOrchestrator(
+            config,
+            storage,
+            console=console,
+            profiles_base_dir=storage.config_path.parent,
+        )
         asyncio.run(orchestrator.run(force_hours=args.hours))
 
     except KeyboardInterrupt:

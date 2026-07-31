@@ -1,4 +1,7 @@
 import json
+import asyncio
+import shutil
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import cast
 
@@ -6,7 +9,13 @@ import pytest
 from pathlib import Path
 import src._file_utils as file_utils
 from src.storage.manager import StorageManager, ConfigError, _expand_env_vars, safe_output_path
-from src.models import AIConfig, Config
+from src.ai.summarizer import DailySummarizer
+from src.models import (
+    AIConfig, Config, ClassificationResult, ContentAnalysis, ContentArtifact,
+    ContentItem, ProcessingResult, SourceType, WebhookConfig,
+)
+from src.processing import ProfileRegistry
+from src.services.webhook import WebhookNotifier
 from pydantic import ValidationError
 
 def test_load_config_missing_file(tmp_path):
@@ -56,6 +65,199 @@ def test_load_config_success(tmp_path):
     config = storage.load_config()
     assert config.collection.time_window_hours == 24
     assert config.ai.provider == "anthropic"
+
+
+def test_load_config_merges_locale_files_with_inline_overrides(tmp_path):
+    locales_dir = tmp_path / "locales"
+    locales_dir.mkdir()
+    (locales_dir / "fr.json").write_text(
+        json.dumps({"header": "Horizon France", "item_prefix": "Actualité {index}/{total}"}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "ai": {
+                    "provider": "openai",
+                    "model": "test",
+                    "api_key_env": "OPENAI_API_KEY",
+                    "languages": ["fr"],
+                    "locales_dir": "locales",
+                    "locales": {"fr": {"header": "Horizon France override"}},
+                },
+                "sources": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = StorageManager(data_dir=str(tmp_path)).load_config()
+
+    assert config.ai.locales["fr"].header == "Horizon France override"
+    assert config.ai.locales["fr"].item_prefix == "Actualité {index}/{total}"
+
+
+@pytest.mark.parametrize(
+    ("filename", "payload", "error"),
+    [
+        ("invalid!.json", "{}", "Invalid locale filename"),
+        ("fr.json", "not json", "Invalid locale JSON"),
+        ("fr.json", "[]", "Locale file must contain a JSON object"),
+    ],
+)
+def test_load_config_rejects_invalid_locale_files(tmp_path, filename, payload, error):
+    locales_dir = tmp_path / "locales"
+    locales_dir.mkdir()
+    (locales_dir / filename).write_text(payload, encoding="utf-8")
+    (tmp_path / "config.json").write_text(json.dumps({
+        "ai": {"provider": "openai", "model": "test", "api_key_env": "KEY",
+               "languages": ["fr"], "locales_dir": "locales"}, "sources": {},
+    }), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=error):
+        StorageManager(data_dir=str(tmp_path)).load_config()
+
+
+def test_load_config_rejects_missing_locale_directory(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({
+        "ai": {"provider": "openai", "model": "test", "api_key_env": "KEY",
+               "locales_dir": "missing"}, "sources": {},
+    }), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="Locale directory does not exist"):
+        StorageManager(data_dir=str(tmp_path)).load_config()
+
+
+def test_save_config_keeps_locale_files_as_source_of_truth(tmp_path):
+    locales_dir = tmp_path / "locales"
+    locales_dir.mkdir()
+    locale_path = locales_dir / "fr.json"
+    locale_path.write_text(
+        json.dumps({"header": "Horizon France v1", "item_prefix": "Actualité {index}/{total}"}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "ai": {
+                    "provider": "openai",
+                    "model": "test",
+                    "api_key_env": "OPENAI_API_KEY",
+                    "languages": ["fr"],
+                    "locales_dir": "locales",
+                    "locales": {"fr": {"tags": "Étiquettes locales"}},
+                },
+                "sources": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    storage = StorageManager(data_dir=str(tmp_path))
+    config = storage.load_config()
+    storage.save_config(config, backup=False)
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["ai"]["locales"] == {"fr": {"tags": "Étiquettes locales"}}
+
+    locale_path.write_text(
+        json.dumps({"header": "Horizon France v2", "item_prefix": "Actualité {index}/{total}"}),
+        encoding="utf-8",
+    )
+    reloaded = storage.load_config()
+    assert reloaded.ai.locales["fr"].header == "Horizon France v2"
+    assert reloaded.ai.locales["fr"].tags == "Étiquettes locales"
+
+
+def test_save_config_can_explicitly_write_effective_locale_overrides(tmp_path):
+    locales_dir = tmp_path / "locales"
+    locales_dir.mkdir()
+    (locales_dir / "fr.json").write_text(
+        json.dumps({"header": "Horizon France", "item_prefix": "Actualité {index}/{total}"}),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "ai": {
+                    "provider": "openai", "model": "test", "api_key_env": "OPENAI_API_KEY",
+                    "languages": ["fr"], "locales_dir": "locales", "locales": {},
+                },
+                "sources": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    storage = StorageManager(data_dir=str(tmp_path))
+    config = storage.load_config()
+    config.ai.locales["fr"].header = "Horizon France edited"
+
+    storage.save_config(config, backup=False, save_effective_locales=True)
+
+    saved = json.loads(config_path.read_text(encoding="utf-8"))
+    assert saved["ai"]["locales"]["fr"]["header"] == "Horizon France edited"
+
+    (locales_dir / "fr.json").write_text(
+        json.dumps({"header": "Horizon France changed", "item_prefix": "Actualité {index}/{total}"}),
+        encoding="utf-8",
+    )
+    assert storage.load_config().ai.locales["fr"].header == "Horizon France edited"
+
+
+def test_custom_production_locale_flows_from_file_to_summary_and_webhook(tmp_path):
+    source_profile = Path(__file__).resolve().parents[1] / "profiles" / "tech-news"
+    profiles_dir = tmp_path / "profiles"
+    shutil.copytree(source_profile, profiles_dir / "tech-news")
+    profile_path = profiles_dir / "tech-news" / "profile.json"
+    profile_data = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile_data["display_names"]["fr"] = "Actualités techniques"
+    profile_path.write_text(json.dumps(profile_data), encoding="utf-8")
+
+    locales_dir = tmp_path / "locales"
+    locales_dir.mkdir()
+    locale = {
+        "header": "Horizon : synthèse", "discussion": "Discussion",
+        "references": "Sources", "tags": "Étiquettes", "unknown_author": "inconnu",
+        "selected_items": "{selected} sur {total}", "empty_analyzed": "{total}",
+        "empty_body": "Aucune actualité.", "overview_instruction": "La suite.",
+        "collapsible_overview_instruction": "Ouvrez les cartes.",
+        "item_prefix": "Actualité {index}/{total}", "date_format": "%d/%m, %H:%M",
+        "webhook_daily_title": "Horizon {date}", "webhook_overview_title": "Aperçu {date}",
+        "webhook_collapsible_title": "Cartes {date}",
+    }
+    (locales_dir / "fr.json").write_text(json.dumps(locale), encoding="utf-8")
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "ai": {"provider": "openai", "model": "test", "api_key_env": "OPENAI_API_KEY",
+               "languages": ["fr"], "locales_dir": "locales", "locale_mode": "production"},
+        "processing": {"profiles_dir": str(profiles_dir), "default_profile": "tech-news"},
+        "sources": {},
+    }), encoding="utf-8")
+
+    config = StorageManager(data_dir=str(tmp_path)).load_config()
+    profiles = ProfileRegistry.load(Path(config.processing.profiles_dir), "tech-news")
+    profiles.validate_output_languages(config.ai.languages, strict=True)
+    summarizer = DailySummarizer(profiles.names, config.ai.locales, strict_locales=True)
+    item = ContentItem(
+        id="rss:1", source_type=SourceType.RSS, title="Original", url="https://example.com",
+        published_at=datetime(2026, 4, 25, 8, 0, tzinfo=timezone.utc),
+        processing=ProcessingResult(
+            classification=ClassificationResult(profile="tech-news", method="source_override"),
+            analysis=ContentAnalysis(score=9, reason="test", summary="Original"),
+            artifacts={"fr": ContentArtifact(language="fr", title="Nouvelle", lead="Résumé")},
+        ),
+    )
+    summary = asyncio.run(summarizer.generate_summary([item], "2026-04-25", 1, "fr"))
+    messages = WebhookNotifier(WebhookConfig(platform="feishu", layout="collapsible")).build_daily_summary_messages(
+        summary, [item], 1, "2026-04-25", "fr", summarizer
+    )
+
+    assert "Horizon : synthèse" in summary
+    assert "25/04, 08:00" in summary
+    assert messages[0]["message_title"] == "Cartes 2026-04-25"
 
 
 @pytest.mark.parametrize(

@@ -19,6 +19,7 @@ from src.models import (
 from src.ai.summarizer import DailySummarizer
 from src.ai.enricher import EnrichmentBatchResult
 from src.mcp.server import hz_get_metrics
+from src.mcp.errors import HorizonMcpError
 from src.mcp.service import HorizonPipelineService
 from src.orchestrator import (
     BalancedDigestResult,
@@ -33,6 +34,15 @@ from src.processing import ProfileRegistry
 PROFILES = ProfileRegistry.load(
     Path(__file__).resolve().parents[1] / "profiles", "tech-news"
 )
+
+
+def write_example_config(config_path: Path, repo_root: Path) -> None:
+    """Write a portable example config with an explicit profile fixture path."""
+    config = json.loads(
+        (repo_root / "data" / "config.example.json").read_text(encoding="utf-8")
+    )
+    config["processing"]["profiles_dir"] = str(repo_root / "profiles")
+    config_path.write_text(json.dumps(config), encoding="utf-8")
 
 
 def make_item(item_id: str, score: float | None = None) -> ContentItem:
@@ -60,10 +70,7 @@ def make_item(item_id: str, score: float | None = None) -> ContentItem:
 def test_validate_config_smoke(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     config_path = tmp_path / "config.json"
-    config_path.write_text(
-        (repo_root / "data" / "config.example.json").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
+    write_example_config(config_path, repo_root)
 
     service = HorizonPipelineService(runs_root=tmp_path / "mcp-runs")
     result = asyncio.run(
@@ -82,10 +89,7 @@ def test_validate_config_smoke(tmp_path: Path) -> None:
 def test_get_effective_config_can_filter_sources(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     config_path = tmp_path / "config.json"
-    config_path.write_text(
-        (repo_root / "data" / "config.example.json").read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
+    write_example_config(config_path, repo_root)
 
     service = HorizonPipelineService(runs_root=tmp_path / "mcp-runs")
     result = service.get_effective_config(
@@ -104,6 +108,7 @@ def test_get_effective_config_redacts_expanded_query_and_header_secrets(
 ) -> None:
     repo_root = Path(__file__).resolve().parents[1]
     config = json.loads((repo_root / "data" / "config.example.json").read_text(encoding="utf-8"))
+    config["processing"]["profiles_dir"] = str(repo_root / "profiles")
     config["sources"]["rss"][0]["url"] = "https://example.com/feed?key=${FEED_TOKEN}&view=full"
     config["sources"]["rss"][1]["url"] = "https://${URL_USER}:${URL_PASSWORD}@example.com/private"
     config["webhook"]["headers"] = "Authorization: Bearer ${AUTH_TOKEN}\nX-Trace: useful"
@@ -488,6 +493,63 @@ def test_run_pipeline_skips_enrichment_when_filter_is_empty(
     assert result["enrich"] is None
     assert calls == [("en", "filtered"), ("zh", "filtered")]
     assert [summary["preview"] for summary in result["summaries"]] == ["", ""]
+
+
+def test_run_pipeline_rejects_languages_not_configured_for_enrichment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    service = HorizonPipelineService(runs_root=tmp_path / "mcp-runs")
+
+    async def fetch_items(**kwargs):  # type: ignore[no-untyped-def]
+        return {"run_id": "run-language-contract"}
+
+    async def score_items(**kwargs):  # type: ignore[no-untyped-def]
+        return {"scored": 0}
+
+    async def filter_items(**kwargs):  # type: ignore[no-untyped-def]
+        return {"kept": 0}
+
+    monkeypatch.setattr(service, "fetch_items", fetch_items)
+    monkeypatch.setattr(service, "score_items", score_items)
+    monkeypatch.setattr(service, "filter_items", filter_items)
+    monkeypatch.setattr(
+        service,
+        "_build_context",
+        lambda **kwargs: (
+            SimpleNamespace(config=SimpleNamespace(ai=SimpleNamespace(languages=["en"]))),
+            [],
+            [],
+        ),
+    )
+
+    with pytest.raises(HorizonMcpError, match="not configured for enrichment: fr"):
+        asyncio.run(service.run_pipeline(languages=["fr"], enrich=False))
+
+
+def test_generate_summary_rejects_language_not_configured_for_enrichment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    service = HorizonPipelineService(runs_root=tmp_path / "mcp-runs")
+    service.run_store.create_run("run-language-contract")
+    service.run_store.save_items("run-language-contract", "filtered", [])
+    monkeypatch.setattr(
+        service,
+        "_load_stage_items",
+        lambda **kwargs: (
+            [],
+            SimpleNamespace(
+                config=SimpleNamespace(ai=SimpleNamespace(languages=["en"])),
+                runtime=SimpleNamespace(DailySummarizer=DailySummarizer),
+            ),
+        ),
+    )
+
+    with pytest.raises(HorizonMcpError, match="not configured for enrichment: fr"):
+        asyncio.run(
+            service.generate_summary(
+                run_id="run-language-contract", language="fr", source_stage="filtered"
+            )
+        )
 
 
 def test_run_pipeline_uses_filtered_stage_when_all_enrichment_fails(

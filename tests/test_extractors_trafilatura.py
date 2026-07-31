@@ -5,11 +5,21 @@ import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 
 from src.extractors import TrafilaturaExtractor
 from src.models import TrafilaturaExtractorConfig
 
 URL = "https://example.com/article"
+
+
+@pytest.fixture(autouse=True)
+def _skip_dns_for_mocked_extractor_requests(monkeypatch):
+    """Keep extractor unit tests independent from external DNS."""
+    async def allow_mocked_url(url: str) -> str:
+        return url
+
+    monkeypatch.setattr("src.url_security.validate_public_http_url", allow_mocked_url)
 
 
 def _extractor() -> TrafilaturaExtractor:

@@ -176,6 +176,7 @@ class HorizonOrchestrator:
         storage: StorageManager,
         console: Optional[Console] = None,
         profiles: Optional[ProfileRegistry] = None,
+        profiles_base_dir: Optional[Path] = None,
     ):
         """Initialize orchestrator.
 
@@ -189,11 +190,25 @@ class HorizonOrchestrator:
         self.console = console or Console(stderr=True)
         self.icons = get_icons(config.display.icon_style)
         self.profiles = profiles or ProfileRegistry.load(
-            Path(config.processing.profiles_dir), config.processing.default_profile
+            Path(config.processing.profiles_dir),
+            config.processing.default_profile,
+            base_dir=profiles_base_dir,
         )
         self.profiles.validate_source_references(
             config.sources.model_dump(mode="json")
         )
+        strict_locales = config.ai.locale_mode == "production"
+        self.profiles.validate_output_languages(
+            config.ai.languages,
+            strict=strict_locales,
+        )
+        locale_validator = DailySummarizer(
+            profile_names=self.profiles.names,
+            locales=config.ai.locales,
+            strict_locales=strict_locales,
+        )
+        for language in config.ai.languages:
+            locale_validator.validate_locale_configuration(language)
         self.email_manager = EmailManager(config.email, console=self.console) if config.email else None
         self.webhook_notifier = (
             WebhookNotifier(config.webhook, console=self.console, icons=self.icons)
@@ -279,7 +294,10 @@ class HorizonOrchestrator:
             # 7. Generate and save daily summaries for each configured language
             today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             for lang in self.config.ai.languages:
-                summarizer = DailySummarizer(profile_names=self.profiles.names)
+                summarizer = DailySummarizer(
+                    profile_names=self.profiles.names, locales=self.config.ai.locales,
+                    strict_locales=self.config.ai.locale_mode == "production",
+                )
                 summary = await summarizer.generate_summary(important_items, today, len(all_items), language=lang)
 
                 # Save to data/summaries/
@@ -1047,13 +1065,16 @@ class HorizonOrchestrator:
             items: Important items to include (already enriched with background/related)
             date: Date string
             total_fetched: Total items fetched
-            language: Output language ("en" or "zh")
+            language: Output language configured in ``ai.languages``
 
         Returns:
             str: Markdown summary
         """
         self.console.print(f"{self.icons['summary']} Generating daily summary...")
 
-        summarizer = DailySummarizer(profile_names=self.profiles.names)
+        summarizer = DailySummarizer(
+            profile_names=self.profiles.names, locales=self.config.ai.locales,
+            strict_locales=self.config.ai.locale_mode == "production",
+        )
 
         return await summarizer.generate_summary(items, date, total_fetched, language=language)

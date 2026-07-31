@@ -15,7 +15,7 @@
     "enrichment_concurrency": 5
   },
   "processing": {
-    "profiles_dir": "profiles",
+    "profiles_dir": "../profiles",
     "default_profile": "tech-news"
   },
   "sources": {

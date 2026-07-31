@@ -51,6 +51,16 @@ def test_loads_builtin_tech_blog_profile():
     assert "Technology blog profile" in profile.match_prompt
 
 
+def test_production_validation_checks_every_loaded_profile_for_auto_routing():
+    registry = ProfileRegistry.load(
+        Path(__file__).resolve().parents[1] / "profiles", "tech-news"
+    )
+    registry.get("tech-blog").definition.display_names.pop("ru")
+
+    with pytest.raises(ValueError, match="tech-blog"):
+        registry.validate_output_languages(["ru"], strict=True)
+
+
 def test_example_config_includes_enabled_nvidia_tech_blog_source():
     root = Path(__file__).resolve().parents[1]
     config = json.loads((root / "data" / "config.example.json").read_text())
@@ -80,6 +90,34 @@ def test_default_profiles_fall_back_to_packaged_resources(tmp_path, monkeypatch)
     monkeypatch.setattr(profile_module, "BUILTIN_PROFILES_DIR", packaged_profiles)
 
     registry = ProfileRegistry.load(Path("profiles"), "tech-news")
+
+    assert registry.get("tech-news").analysis_prompt
+
+
+def test_relative_profiles_dir_resolves_from_config_directory(tmp_path, monkeypatch):
+    source_profiles = Path(__file__).resolve().parents[1] / "profiles"
+    config_dir = tmp_path / "etc" / "horizon"
+    shutil.copytree(source_profiles, config_dir / "profiles")
+    unrelated_working_dir = tmp_path / "elsewhere"
+    unrelated_working_dir.mkdir()
+    monkeypatch.chdir(unrelated_working_dir)
+
+    registry = ProfileRegistry.load(
+        Path("profiles"), "tech-news", base_dir=config_dir
+    )
+
+    assert registry.get("tech-news").analysis_prompt
+
+
+def test_default_example_profiles_path_resolves_from_data_config_directory():
+    root = Path(__file__).resolve().parents[1]
+    config = json.loads((root / "data" / "config.example.json").read_text())
+
+    registry = ProfileRegistry.load(
+        Path(config["processing"]["profiles_dir"]),
+        config["processing"]["default_profile"],
+        base_dir=root / "data",
+    )
 
     assert registry.get("tech-news").analysis_prompt
 

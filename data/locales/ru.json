@@ -1,0 +1,17 @@
+{
+  "header": "Horizon: ежедневная сводка",
+  "discussion": "Обсуждение",
+  "references": "Ссылки",
+  "tags": "Теги",
+  "unknown_author": "неизвестный автор",
+  "empty_body": "Сегодня значимых обновлений не найдено.",
+  "overview_instruction": "Подробности будут отправлены отдельными сообщениями — можно читать только интересующие темы.",
+  "collapsible_overview_instruction": "Раскройте карточки ниже, чтобы прочитать полный материал в Feishu/Lark.",
+  "item_prefix": "Новость {index} из {total}",
+  "plural_rule": "russian",
+  "date_format": "{day} {month}, {time}",
+  "month_names": ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"],
+  "webhook_daily_title": "Horizon {date} — ежедневная сводка",
+  "webhook_overview_title": "Horizon {date} — обзор",
+  "webhook_collapsible_title": "Horizon {date} — сводка с карточками"
+}

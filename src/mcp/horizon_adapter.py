@@ -35,6 +35,7 @@ class HorizonRuntime:
     ContentEnricher: Any
     DailySummarizer: Any
     expand_env_vars: Any
+    load_locale_files: Any
 
 
 def resolve_horizon_path(explicit: str | None = None) -> Path:
@@ -142,6 +143,7 @@ def load_runtime(horizon_path: Path) -> HorizonRuntime:
         ContentEnricher=enricher.ContentEnricher,
         DailySummarizer=summarizer.DailySummarizer,
         expand_env_vars=storage._expand_env_vars,
+        load_locale_files=storage._load_locale_files,
     )
 
 
@@ -149,9 +151,10 @@ def load_config(runtime: HorizonRuntime, config_path: Path) -> Any:
     """Load Horizon config using native pydantic model."""
 
     try:
-        payload = runtime.expand_env_vars(
-            json.loads(config_path.read_text(encoding="utf-8"))
+        payload = runtime.load_locale_files(
+            json.loads(config_path.read_text(encoding="utf-8")), config_path
         )
+        payload = runtime.expand_env_vars(payload)
         return runtime.Config.model_validate(payload)
     except Exception as exc:
         raise HorizonMcpError(

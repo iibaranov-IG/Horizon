@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime, timezone
+import pytest
 
 from src.ai.summarizer import DailySummarizer
 from src.models import (
@@ -12,6 +13,7 @@ from src.models import (
     ContentBlock,
     ContentItem,
     ProcessingResult,
+    LocaleConfig,
     SourceType,
 )
 
@@ -210,6 +212,14 @@ def test_generate_summary_renumbers_interleaved_profiles_and_localizes_headings(
     assert '<a id="item-tech-blog-1"></a>' in result
 
 
+def test_profile_heading_falls_back_to_the_primary_language_tag():
+    summarizer = DailySummarizer(
+        profile_names={"tech-news": {"default": "Technology News", "ru": "Новости"}}
+    )
+
+    assert summarizer.profile_name("tech-news", "ru-RU") == "Новости"
+
+
 def test_generate_empty_summary_zh_uses_localized_analyzed_line():
     summarizer = DailySummarizer()
 
@@ -320,3 +330,146 @@ def test_generate_summary_preserves_normal_http_links():
     assert "[Important Item 1](https://example.com/items/1)" in result
     assert "[Discussion](https://example.com/discuss?id=1#comments)" in result
     assert 'href="https://docs.example.com/path?q=one&amp;lang=en"' in result
+
+
+def test_russian_summary_uses_russian_labels_and_item_prefix():
+    summarizer = DailySummarizer()
+    item = _make_item(1)
+    item.processing.artifacts["ru"] = ContentArtifact(
+        language="ru",
+        title="Важная новость",
+        lead="Краткое русскоязычное описание.",
+        blocks=[],
+    )
+
+    summary = _run_async(summarizer.generate_summary([item], "2026-07-31", 1, language="ru"))
+    webhook_item = summarizer.generate_webhook_item(item, "ru", 1, 3)
+
+    assert "# Horizon: ежедневная сводка - 2026-07-31" in summary
+    assert "Отобрано: 1 важная новость из 1 материала." in summary
+    assert "Важная новость" in summary
+    assert webhook_item.startswith("Новость 1 из 3")
+
+
+def test_russian_overview_and_item_metadata_are_fully_localized():
+    summarizer = DailySummarizer()
+    items = [_make_item(1), _make_item(2)]
+    for item in items:
+        item.processing.artifacts["ru"] = ContentArtifact(
+            language="ru", title="Важная новость", lead="Краткое описание."
+        )
+    items[0].author = None
+    items[0].published_at = datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)
+
+    overview = summarizer.generate_webhook_overview(items, "2026-07-31", 5, language="ru")
+    item_message = summarizer.generate_webhook_item(items[0], "ru", 1, 2)
+
+    assert "Отобрано: 2 важные новости из 5 материалов." in overview
+    assert "Подробности будут отправлены отдельными сообщениями" in overview
+    assert "Selected" not in overview
+    assert "неизвестный автор · 31 июля, 08:00" in item_message
+    assert "Jul" not in item_message
+
+
+def test_custom_locale_configures_rendering_without_a_code_change():
+    summarizer = DailySummarizer(
+        locales={
+            "fr": {
+                "header": "Horizon : synthèse",
+                "selected_items": "{selected} sélection sur {total} éléments.",
+                "overview_instruction": "Les détails suivent.",
+                "item_prefix": "Actualité {index}/{total}",
+                "date_format": "%d/%m, %H:%M",
+                "unknown_author": "auteur inconnu",
+            }
+        }
+    )
+    item = _make_item(1)
+    item.processing.artifacts["fr"] = ContentArtifact(
+        language="fr", title="Nouvelle importante", lead="Résumé français."
+    )
+    item.author = None
+
+    overview = summarizer.generate_webhook_overview([item], "2026-04-25", 3, language="fr")
+    item_message = summarizer.generate_webhook_item(item, "fr", 1, 1)
+
+    assert "# Horizon : synthèse - 2026-04-25" in overview
+    assert "1 sélection sur 3 éléments." in overview
+    assert "Les détails suivent." in overview
+    assert item_message.startswith("Actualité 1/1")
+    assert "auteur inconnu · 25/04, 08:00" in item_message
+
+
+def test_partial_builtin_locale_override_preserves_its_native_rules():
+    summarizer = DailySummarizer(
+        locales={"ru": LocaleConfig(header="Горизонт: обзор")}
+    )
+    item = _make_item(1)
+    item.processing.artifacts["ru"] = ContentArtifact(
+        language="ru", title="Новость", lead="Описание."
+    )
+    item.published_at = datetime(2026, 7, 31, 8, 0, tzinfo=timezone.utc)
+
+    summary = _run_async(summarizer.generate_summary([item], "2026-07-31", 1, "ru"))
+    item_message = summarizer.generate_webhook_item(item, "ru", 1, 1)
+
+    assert "# Горизонт: обзор - 2026-07-31" in summary
+    assert "Отобрано: 1 важная новость из 1 материала." in summary
+    assert "31 июля, 08:00" in item_message
+
+
+def test_locale_config_rejects_invalid_runtime_formatting_rules():
+    with pytest.raises(ValueError, match="month_names"):
+        LocaleConfig(month_names=["январь"] * 11)
+    with pytest.raises(ValueError, match="item_prefix may only use"):
+        LocaleConfig(item_prefix="Новость {number}")
+    with pytest.raises(ValueError, match="placeholders require month_names"):
+        LocaleConfig(date_format="{day} {month}")
+
+
+def test_underscore_language_tag_uses_its_builtin_locale_in_production():
+    summarizer = DailySummarizer(strict_locales=True)
+
+    summarizer.validate_locale_configuration("zh_CN")
+    assert summarizer._locale("zh_CN")["header"] == "Horizon 每日速递"
+
+
+def test_uppercase_builtin_language_tag_uses_its_builtin_locale_in_production():
+    summarizer = DailySummarizer(strict_locales=True)
+
+    summarizer.validate_locale_configuration("ZH_cn")
+    assert summarizer._locale("ZH_cn")["header"] == "Horizon 每日速递"
+
+
+def test_production_custom_locale_requires_a_language_safe_date_format():
+    locale = LocaleConfig(
+        header="FR",
+        discussion="Discussion",
+        references="Sources",
+        tags="Tags",
+        unknown_author="inconnu",
+        selected_items="{selected}/{total}",
+        empty_analyzed="{total}",
+        empty_body="Vide",
+        overview_instruction="Suite",
+        collapsible_overview_instruction="Suite",
+        item_prefix="{index}/{total}",
+        webhook_daily_title="{date}",
+        webhook_overview_title="{date}",
+        webhook_collapsible_title="{date}",
+    )
+    summarizer = DailySummarizer(locales={"fr": locale}, strict_locales=True)
+
+    with pytest.raises(ValueError, match="date_format"):
+        summarizer.validate_locale_configuration("fr")
+
+
+def test_production_rejects_an_artifact_with_a_mismatched_declared_language():
+    item = _make_item(1)
+    item.processing.artifacts["en"] = ContentArtifact(
+        language="fr", title="English title", lead="English lead"
+    )
+    summarizer = DailySummarizer(strict_locales=True)
+
+    with pytest.raises(ValueError, match="declares language='fr'"):
+        summarizer._validate_language_output([item], "en")
