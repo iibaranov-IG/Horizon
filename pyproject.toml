@@ -39,7 +39,7 @@ twitter = [
 [project.scripts]
 horizon = "src.main:main"
 horizon-mcp = "src.mcp.server:main"
-horizon-wizard = "src.setup.wizard:main"
+horizon-wizard = "src.setup.wizard_cli:main"
 horizon-webhook = "src.services.webhook_cli:main"
 horizon-locales = "src.services.locales_cli:main"
 
