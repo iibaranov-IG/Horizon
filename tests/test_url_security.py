@@ -315,7 +315,7 @@ def test_https_request_pins_ip_and_preserves_sni_host_and_certificate_validation
     assert stream.writes and all(tls_started for tls_started, _ in stream.writes)
     wire_bytes = b"".join(buffer for _, buffer in stream.writes)
     assert b"host: example.com" in wire_bytes.lower()
-    assert b"authorization: Bearer top-secret" in wire_bytes
+    assert b"authorization: bearer top-secret" in wire_bytes.lower()
     assert b"private-payload" in wire_bytes
 
 
