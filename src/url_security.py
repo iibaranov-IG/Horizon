@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+import ssl
 from collections.abc import Iterable
 from urllib.parse import urljoin, urlsplit
 
 import httpx
+import httpcore
 
 
 DEFAULT_MAX_RESPONSE_BYTES = 1_048_576
@@ -16,6 +18,77 @@ DEFAULT_MAX_RESPONSE_BYTES = 1_048_576
 
 class UnsafeURLError(ValueError):
     """Raised when a URL may target a non-public network resource."""
+
+
+class _CoreStream(httpx.AsyncByteStream):
+    """Adapt the public httpcore streaming protocol to HTTPX."""
+
+    def __init__(self, stream: object) -> None:
+        self._stream = stream
+
+    async def __aiter__(self):
+        async for part in self._stream:  # type: ignore[union-attr]
+            yield part
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()  # type: ignore[union-attr]
+
+
+class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Connect one HTTP origin to one already-validated IP address only."""
+
+    def __init__(self, hostname: str, port: int, address: str) -> None:
+        self._hostname = hostname.rstrip(".").lower()
+        self._port = port
+        self._address = address
+        self._backend = httpcore.AnyIOBackend()
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        if host.rstrip(".").lower() != self._hostname or port != self._port:
+            raise httpcore.ConnectError("Pinned transport refused an unexpected origin")
+        return await self._backend.connect_tcp(
+            self._address, port, timeout=timeout, local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise httpcore.ConnectError("Pinned transport does not allow Unix sockets")
+
+    async def sleep(self, seconds):
+        await self._backend.sleep(seconds)
+
+
+class _PinnedAsyncTransport(httpx.AsyncBaseTransport):
+    """HTTPX transport that preserves origin/SNI while pinning the TCP peer."""
+
+    def __init__(self, hostname: str, port: int, address: str) -> None:
+        self._pool = httpcore.AsyncConnectionPool(
+            ssl_context=ssl.create_default_context(),
+            network_backend=_PinnedNetworkBackend(hostname, port, address),
+            max_connections=1,
+            max_keepalive_connections=0,
+            http1=True,
+            http2=False,
+            retries=0,
+        )
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        core_request = httpcore.Request(
+            method=request.method,
+            url=httpcore.URL(
+                scheme=request.url.raw_scheme, host=request.url.raw_host,
+                port=request.url.port, target=request.url.raw_path,
+            ),
+            headers=request.headers.raw, content=request.stream, extensions=request.extensions,
+        )
+        response = await self._pool.handle_async_request(core_request)
+        return httpx.Response(
+            status_code=response.status, headers=response.headers,
+            stream=_CoreStream(response.stream), extensions=response.extensions,
+        )
+
+    async def aclose(self) -> None:
+        await self._pool.aclose()
 
 
 def validate_http_url(url: str) -> str:
@@ -147,8 +220,21 @@ async def _bounded_real_request(
     max_response_bytes: int,
     kwargs: dict,
 ) -> httpx.Response:
-    request = client.build_request(method, url, **kwargs)
-    response = await client.send(request, stream=True, follow_redirects=False)
+    parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").rstrip(".")
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    # All answers were validated above. Select one deterministically and never
+    # pass the hostname to the socket backend, preventing a second DNS lookup.
+    address = sorted(allowed_addresses)[0]
+    transport = _PinnedAsyncTransport(hostname, port, address)
+    pinned_client = httpx.AsyncClient(
+        transport=transport,
+        timeout=client.timeout,
+        follow_redirects=False,
+        trust_env=False,
+    )
+    request = pinned_client.build_request(method, url, **kwargs)
+    response = await pinned_client.send(request, stream=True)
     try:
         _verify_response_peer(response, allowed_addresses)
         declared_size = _declared_response_size(response)
@@ -178,6 +264,7 @@ async def _bounded_real_request(
         )
     finally:
         await response.aclose()
+        await pinned_client.aclose()
 
 
 def _validate_buffered_response_size(response: object, max_response_bytes: int) -> None:
