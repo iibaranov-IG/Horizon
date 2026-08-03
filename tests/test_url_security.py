@@ -3,9 +3,15 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
-from src.url_security import UnsafeURLError, safe_request, validate_public_http_url
+from src.url_security import (
+    UnsafeURLError,
+    _verify_response_peer,
+    safe_request,
+    validate_public_http_url,
+)
 
 
 def _run(coro):
@@ -69,6 +75,7 @@ def test_redirect_is_validated_before_second_request():
     redirect = MagicMock(
         status_code=302,
         headers={"location": "http://127.0.0.1/admin"},
+        content=b"",
     )
     client = MagicMock()
     client.get = AsyncMock(return_value=redirect)
@@ -86,8 +93,8 @@ def test_redirect_is_validated_before_second_request():
 
 
 def test_public_relative_redirect_is_followed():
-    redirect = MagicMock(status_code=301, headers={"location": "/next"})
-    success = MagicMock(status_code=200, headers={})
+    redirect = MagicMock(status_code=301, headers={"location": "/next"}, content=b"")
+    success = MagicMock(status_code=200, headers={}, content=b"ok")
     client = MagicMock()
     client.get = AsyncMock(side_effect=[redirect, success])
 
@@ -100,3 +107,88 @@ def test_public_relative_redirect_is_followed():
     assert result is success
     assert client.get.await_args_list[1].args == ("https://example.com/next",)
     assert client.get.await_args_list[1].kwargs == {"follow_redirects": False}
+
+
+def test_rejects_declared_response_larger_than_limit():
+    response = MagicMock(
+        status_code=200,
+        headers={"content-length": "11"},
+        content=b"small",
+    )
+    client = MagicMock()
+    client.get = AsyncMock(return_value=response)
+
+    with patch(
+        "src.url_security._resolve_hostname",
+        new=AsyncMock(return_value={"93.184.216.34"}),
+    ):
+        with pytest.raises(UnsafeURLError, match="maximum allowed size"):
+            _run(
+                safe_request(
+                    client,
+                    "GET",
+                    "https://example.com/start",
+                    max_response_bytes=10,
+                )
+            )
+
+
+def test_rejects_buffered_response_larger_than_limit_without_content_length():
+    response = MagicMock(status_code=200, headers={}, content=b"01234567890")
+    client = MagicMock()
+    client.get = AsyncMock(return_value=response)
+
+    with patch(
+        "src.url_security._resolve_hostname",
+        new=AsyncMock(return_value={"93.184.216.34"}),
+    ):
+        with pytest.raises(UnsafeURLError, match="maximum allowed size"):
+            _run(
+                safe_request(
+                    client,
+                    "GET",
+                    "https://example.com/start",
+                    max_response_bytes=10,
+                )
+            )
+
+
+class _NetworkStream:
+    def __init__(self, peer):
+        self.peer = peer
+
+    def get_extra_info(self, name):
+        if name in {"server_addr", "peername"}:
+            return self.peer
+        return None
+
+
+def test_connected_peer_must_match_validated_dns_result():
+    response = httpx.Response(
+        200,
+        request=httpx.Request("GET", "https://example.com"),
+        extensions={"network_stream": _NetworkStream(("93.184.216.35", 443))},
+    )
+
+    with pytest.raises(UnsafeURLError, match="not in the validated DNS result set"):
+        _verify_response_peer(response, {"93.184.216.34"})
+
+
+def test_connected_peer_matching_validated_dns_result_is_accepted():
+    response = httpx.Response(
+        200,
+        request=httpx.Request("GET", "https://example.com"),
+        extensions={"network_stream": _NetworkStream(("93.184.216.34", 443))},
+    )
+
+    _verify_response_peer(response, {"93.184.216.34"})
+
+
+def test_missing_peer_metadata_fails_closed():
+    response = httpx.Response(
+        200,
+        request=httpx.Request("GET", "https://example.com"),
+    )
+
+    with pytest.raises(UnsafeURLError, match="Could not verify"):
+        _verify_response_peer(response, {"93.184.216.34"})
