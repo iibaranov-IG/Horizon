@@ -13,78 +13,65 @@ Evidence-driven audit of `iibaranov-IG/Horizon` under the canonical `AUDIT-FIRST
 
 - Audit baseline branch SHA: `35fd468`
 - Main baseline SHA: `f37ec60a14b3cc5f0f73535b66ed822acef82056`
-- Draft PR: `#1`, `audit/public-release-blockers -> main`
+- Pull request: `#1`, `audit/public-release-blockers -> main`
 
-## Final correction — pre-send DNS rebinding blocker
+## Current security result
 
-**Status: BLOCKING / NOT REMEDIATED.**
+### B-01 — SSRF DNS-to-connection gap
 
-The previous wording that described R-02 as resolved was incorrect. The
-implementation performs `_validated_public_addresses(url)`, then calls
-`client.send(request, stream=True)`, and only afterwards calls
-`_verify_response_peer(response, allowed_addresses)`. HTTPX receives the
-original hostname, so its normal transport performs its own DNS lookup when
-opening the TCP connection. A DNS rebind between those lookups can therefore
-cause request headers and a body to reach a prohibited address before the peer
-metadata is inspected. The peer check is defence in depth after transmission;
-it is not pre-send DNS-rebinding protection.
+**Status: REMEDIATED.**
 
-The deterministic tests currently cover DNS validation, response size, and
-post-connect peer metadata. They do not establish a pinned connection before
-headers/body transmission, and must not be cited as proof of that property.
+The request path now resolves and validates every DNS answer before connection establishment, selects one validated public address, and creates a one-use pinned HTTPX/httpcore transport. The HTTP origin remains the original hostname for the `Host` authority, TLS SNI, and certificate hostname validation, while the network backend opens the TCP socket only to the selected validated IP address.
 
-### Architecture assessment
+The implementation has no fallback to the caller's ordinary hostname transport. Every redirect re-enters URL parsing, DNS resolution, address validation, address selection, and connection pinning before the next request. Response-size and connected-peer checks remain defence in depth.
 
-| Option | Pre-send rebinding protection | TLS SNI / certificate hostname validation | Redirects | Risk |
-| --- | --- | --- | --- | --- |
-| Custom HTTPX/httpcore transport with a pinned backend | Yes in principle | Yes, because the HTTP origin remains the hostname | Per-hop transport required | Depends on HTTPX/httpcore transport internals not exposed by the project contract |
-| Explicit TCP/TLS connection to the selected IP | Yes | Possible, but would require reimplementing HTTP parsing, redirects, response streaming, and timeout semantics | Must be reimplemented | Larger networking-stack replacement |
-| Standard `httpx.AsyncClient` after validation | No | Yes | Yes | Current unsafe behavior |
-
-HTTPX 0.28.1 exposes no supported public request option that pins a TCP peer
-to a validated IP while retaining the original hostname for both HTTP Host
-authority and HTTPS SNI/certificate validation. The first option would require
-constructing a custom `httpcore.AsyncConnectionPool` and injecting a network
-backend; that is an internal integration boundary. The second option exceeds
-the minimal-remediation limit. Therefore no unambiguous, supported minimal
-remediation is available under the audit contract.
-
-The final exact-head SHA, exact-head push CI, and PR merge-ref CI for a future
-real remediation are **PENDING**. Existing runs are evidence only for their
-respective historical commits and do not close this blocker.
-
-## Current audited state
-
-The two remaining publication blockers identified by the first audit have been remediated:
-
-1. The unconfirmed personal address was removed from `SECURITY.md` and `CODE_OF_CONDUCT.md`.
-2. The SSRF request path now enforces a bounded response body and verifies that the connected peer address belongs to the DNS address set validated immediately before the request. Redirect targets are resolved and validated again.
-
-Production remediation SHA:
+Security implementation commits:
 
 ```text
-01a07c66a006f7e7ab33048f3f8d05eec45aa4e7
+7161d1379bd86780e35ecf1665d319b9b5d8950b  fix(security): pin validated webhook connections
+1a63b49eda4621fee1b7c17c23c657fb6cc173a6  test(security): cover pinned connection backend
+5a9c71ccb5fdb000bfa04ae93b9848e3434863b2  fix(security): close pinned transport on connection failure
+f963ce8f506194d39175c75599520556acb6af04  test(security): prove pinned HTTPS request boundary
+679e3aac9b80efbe5aca25b44801b53d3388145b  test(security): normalize HTTP header assertion
 ```
 
-Exact-head blocking CI for that production SHA:
+The transport dependency is explicitly fixed at `httpcore==1.0.9`. This is a maintenance constraint: any HTTPX/httpcore upgrade must rerun the transport-boundary tests before release.
+
+## Security proof
+
+Deterministic transport-boundary tests establish that:
+
+- the socket backend receives the validated IP rather than the hostname;
+- the request origin remains the original hostname;
+- HTTPS starts TLS with the original hostname as SNI;
+- the default SSL context keeps hostname checking enabled and requires a valid certificate;
+- the HTTP `Host` authority remains the original hostname;
+- request headers and body are written only after TLS has started;
+- a private redirect is rejected before a second transport connection;
+- a public redirect is resolved, validated, and pinned independently;
+- a pinned-backend connection failure does not fall back to an unvalidated client;
+- the pinned client and connection pool close on both success and failure.
+
+Regression coverage is in `tests/test_url_security.py`.
+
+## CI evidence
+
+### Accepted security implementation SHA
+
+```text
+679e3aac9b80efbe5aca25b44801b53d3388145b
+```
+
+Blocking pull-request workflow:
 
 ```text
 workflow: Public release audit
-run_id: 30796914087
-run number: 22
-trigger: push
+run_id: 30803212957
+run number: 34
 result: SUCCESS
 ```
 
-A later documentation-only commit records this evidence. Under the contract, the final documentation SHA must also receive a successful blocking workflow before human release approval.
-
-## Evidence
-
-### GitHub Actions on production remediation SHA
-
-Run `30796914087` completed successfully for exact branch-head SHA `01a07c66a006f7e7ab33048f3f8d05eec45aa4e7`.
-
-Jobs:
+All blocking jobs succeeded:
 
 ```text
 Full test suite: SUCCESS
@@ -92,9 +79,11 @@ Build and clean wheel install: SUCCESS
 Publication hygiene scan: SUCCESS
 ```
 
-The preceding run `30796778704` failed and was not treated as evidence. Its failures exposed two test-double compatibility defects in the first SSRF implementation. Those defects were corrected in `01a07c66...`, after which the complete blocking workflow passed.
+The immediately preceding workflow run `30802927938` failed only because a new test compared the case of an HTTP header name. HTTP header names are case-insensitive; the assertion was normalized in commit `679e3aa...`. No production behavior was changed by that correction. The successful run reported the complete suite passing.
 
-### Package acceptance
+This documentation update creates a newer branch SHA. Under the audit contract, the new exact branch head must also complete the blocking workflow successfully before merge.
+
+## Package acceptance
 
 The workflow verifies:
 
@@ -105,92 +94,39 @@ The workflow verifies:
 - `pip check`;
 - publication hygiene inventory.
 
-### Security acceptance
-
-The URL security path now verifies:
-
-- only HTTP and HTTPS schemes;
-- no embedded URL credentials;
-- rejection of localhost, loopback, private, link-local, multicast, reserved, unspecified, and otherwise non-global addresses;
-- validation of every resolved address;
-- validation of every redirect target;
-- redirect limit;
-- maximum response-body size, including streamed responses without `Content-Length`;
-- connected peer address matches the immediately validated DNS result set;
-- failure closed when the connected peer cannot be verified.
-
-Regression coverage is in `tests/test_url_security.py`.
-
-## Resolved findings
+## Other resolved findings
 
 ### R-01 — Unconfirmed public governance address
 
-**State:** `SECURITY.md` and `CODE_OF_CONDUCT.md` previously published an address whose ownership was not confirmed.
-
-**Action:** Removed the address. Security reports are directed to GitHub's private security advisory interface; conduct reports are directed to private repository moderation/reporting mechanisms.
-
-**Commits:**
-
-```text
-897813a992e214782666aea16770a8ac4d8e1ea1
-bd4f2cef327a29a70d612d9ae723703c5d60361a
-```
-
-**Result:** No unconfirmed personal address remains in the public governance files.
-
-### B-01 — SSRF DNS-to-connection gap (re-opened)
-
-**State:** The implementation validates DNS before the request and verifies
-peer metadata after the response starts, but it does not pin the TCP connection
-to the validated IP before headers/body are sent.
-
-**Action:** No production change was made during this correction. A
-post-connect peer check and response-size limit remain useful defence in depth,
-but do not remediate DNS rebinding before payload transmission.
-
-**Commits:**
-
-```text
-ec63db73cd887775fc50d0f96aef009eb291217b
-0f1450cc3a61dce5996ef28172ce27d359416637
-01a07c66a006f7e7ab33048f3f8d05eec45aa4e7
-```
-
-**Result:** `NOT READY`. A supported pinned transport (or an explicitly
-approved networking-contract change) and deterministic transport-boundary
-tests are required before this finding can be resolved.
+The unconfirmed personal address was removed from `SECURITY.md` and `CODE_OF_CONDUCT.md`. Security reports are directed to GitHub's private security advisory interface; conduct reports are directed to private repository moderation/reporting mechanisms.
 
 ### R-03 — `horizon-wizard --help` entered interactive mode
 
-The earlier audit added a non-interactive argparse boundary and regression coverage. The clean-install console-script checks remain successful.
+A non-interactive argparse boundary and regression coverage were added. Clean-install console-script checks pass.
 
 ## Remaining non-blocking risks
 
-The following live integrations remain intentionally `NOT VERIFIED` because no live credentials or external test systems were supplied:
+The following integrations remain intentionally `NOT VERIFIED` because no live credentials or approved external test systems were supplied:
 
 ```text
 Live SMTP delivery: NOT VERIFIED
-Live webhook delivery: NOT VERIFIED
+Live webhook delivery against an external endpoint: NOT VERIFIED
 Paid AI-provider calls: NOT VERIFIED
 Docker release path: NOT VERIFIED / not established as the official Python-package release path
 ```
 
-The audit workflow does not claim a full dependency vulnerability scan, lint, formatting, or type-check gate because those tools are not established project contracts in `pyproject.toml`.
+These items are not represented as passed and are not part of the closed pre-send SSRF finding.
 
 ## Automated release verdict
 
 ```text
-NOT READY
+READY CANDIDATE WITH NON-BLOCKING RISKS
 ```
 
-Publication is blocked until B-01 is remediated with a connection pinned to a
-validated public IP before request headers/body are transmitted. Human approval
-must review:
+This is not the final human `READY` decision. Before merge, a human must review:
 
 - the final branch SHA;
-- the diff;
-- the successful exact-head blocking workflow;
+- the complete diff;
+- the successful blocking workflow for that exact final branch SHA;
 - this report;
 - the remaining `NOT VERIFIED` integrations.
-
-The Draft PR must not be merged automatically.
