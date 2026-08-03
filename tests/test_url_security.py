@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import ssl
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpcore
 import httpx
 import pytest
 
@@ -67,7 +69,9 @@ def test_rejects_hostname_when_any_resolved_ip_is_private():
 def test_accepts_public_ipv4_and_ipv6_dns_answers():
     with patch(
         "src.url_security._resolve_hostname",
-        new=AsyncMock(return_value={"93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"}),
+        new=AsyncMock(
+            return_value={"93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"}
+        ),
     ):
         assert _run(validate_public_http_url("https://example.com/hook"))
 
@@ -220,3 +224,185 @@ def test_pinned_backend_rejects_unexpected_origin_without_dns(monkeypatch):
         _run(backend.connect_tcp("rebound.example", 443))
 
     connect.assert_not_awaited()
+
+
+class _TLSObject:
+    def selected_alpn_protocol(self):
+        return None
+
+
+class _ScriptedStream:
+    def __init__(self, peer: str, response: bytes) -> None:
+        self.peer = peer
+        self._reads = [response, b""]
+        self.writes: list[tuple[bool, bytes]] = []
+        self.tls_started = False
+        self.server_hostname = None
+        self.ssl_context = None
+        self.closed = False
+
+    async def read(self, max_bytes: int, timeout=None) -> bytes:
+        return self._reads.pop(0) if self._reads else b""
+
+    async def write(self, buffer: bytes, timeout=None) -> None:
+        self.writes.append((self.tls_started, bytes(buffer)))
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+    async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        self.tls_started = True
+        self.server_hostname = server_hostname
+        self.ssl_context = ssl_context
+        return self
+
+    def get_extra_info(self, name):
+        if name == "ssl_object" and self.tls_started:
+            return _TLSObject()
+        if name in {"server_addr", "peername"}:
+            return (self.peer, 443)
+        return None
+
+
+class _ScriptedBackend:
+    def __init__(self, stream: _ScriptedStream, *, error: Exception | None = None) -> None:
+        self.stream = stream
+        self.error = error
+        self.connect_calls: list[tuple[str, int]] = []
+
+    async def connect_tcp(self, host, port, **kwargs):
+        self.connect_calls.append((host, port))
+        if self.error is not None:
+            raise self.error
+        return self.stream
+
+    async def sleep(self, seconds):
+        return None
+
+
+def _http_response(status: str = "200 OK", headers: dict[str, str] | None = None, body: bytes = b"OK") -> bytes:
+    response_headers = {"Content-Length": str(len(body)), **(headers or {})}
+    lines = [f"HTTP/1.1 {status}", *[f"{key}: {value}" for key, value in response_headers.items()], "", ""]
+    return "\r\n".join(lines).encode("ascii") + body
+
+
+def test_https_request_pins_ip_and_preserves_sni_host_and_certificate_validation(monkeypatch):
+    stream = _ScriptedStream("93.184.216.34", _http_response())
+    backend = _ScriptedBackend(stream)
+    monkeypatch.setattr("src.url_security.httpcore.AnyIOBackend", lambda: backend)
+
+    resolver = AsyncMock(return_value={"93.184.216.34"})
+    with patch("src.url_security._resolve_hostname", new=resolver):
+        async def exercise():
+            async with httpx.AsyncClient() as client:
+                return await safe_request(
+                    client,
+                    "POST",
+                    "https://example.com/hook",
+                    headers={"Authorization": "Bearer top-secret"},
+                    content=b"private-payload",
+                )
+
+        response = _run(exercise())
+
+    assert response.status_code == 200
+    assert response.content == b"OK"
+    resolver.assert_awaited_once_with("example.com", 443)
+    assert backend.connect_calls == [("93.184.216.34", 443)]
+    assert stream.server_hostname in {"example.com", b"example.com"}
+    assert stream.ssl_context.check_hostname is True
+    assert stream.ssl_context.verify_mode == ssl.CERT_REQUIRED
+    assert stream.writes and all(tls_started for tls_started, _ in stream.writes)
+    wire_bytes = b"".join(buffer for _, buffer in stream.writes)
+    assert b"host: example.com" in wire_bytes.lower()
+    assert b"authorization: Bearer top-secret" in wire_bytes
+    assert b"private-payload" in wire_bytes
+
+
+def test_private_redirect_is_rejected_before_a_second_transport_connect(monkeypatch):
+    stream = _ScriptedStream(
+        "93.184.216.34",
+        _http_response(
+            "302 Found",
+            headers={"Location": "http://127.0.0.1/admin"},
+            body=b"",
+        ),
+    )
+    backend = _ScriptedBackend(stream)
+    factories = [backend]
+    monkeypatch.setattr(
+        "src.url_security.httpcore.AnyIOBackend", lambda: factories.pop(0)
+    )
+
+    resolver = AsyncMock(side_effect=[{"93.184.216.34"}, {"127.0.0.1"}])
+    with patch("src.url_security._resolve_hostname", new=resolver):
+        async def exercise():
+            async with httpx.AsyncClient() as client:
+                await safe_request(client, "GET", "https://example.com/start")
+
+        with pytest.raises(UnsafeURLError, match="non-public"):
+            _run(exercise())
+
+    assert backend.connect_calls == [("93.184.216.34", 443)]
+    assert factories == []
+    assert resolver.await_count == 2
+
+
+def test_public_redirect_re_resolves_and_re_pins_each_hop(monkeypatch):
+    first_stream = _ScriptedStream(
+        "93.184.216.34",
+        _http_response(
+            "302 Found",
+            headers={"Location": "https://second.example/next"},
+            body=b"",
+        ),
+    )
+    second_stream = _ScriptedStream("93.184.216.35", _http_response(body=b"done"))
+    first_backend = _ScriptedBackend(first_stream)
+    second_backend = _ScriptedBackend(second_stream)
+    factories = [first_backend, second_backend]
+    monkeypatch.setattr(
+        "src.url_security.httpcore.AnyIOBackend", lambda: factories.pop(0)
+    )
+
+    resolver = AsyncMock(
+        side_effect=[{"93.184.216.34"}, {"93.184.216.35"}]
+    )
+    with patch("src.url_security._resolve_hostname", new=resolver):
+        async def exercise():
+            async with httpx.AsyncClient() as client:
+                return await safe_request(client, "GET", "https://example.com/start")
+
+        response = _run(exercise())
+
+    assert response.content == b"done"
+    assert first_backend.connect_calls == [("93.184.216.34", 443)]
+    assert second_backend.connect_calls == [("93.184.216.35", 443)]
+    assert first_stream.server_hostname in {"example.com", b"example.com"}
+    assert second_stream.server_hostname in {"second.example", b"second.example"}
+    assert resolver.await_args_list[0].args == ("example.com", 443)
+    assert resolver.await_args_list[1].args == ("second.example", 443)
+
+
+def test_pinned_transport_failure_has_no_fallback_to_unvalidated_client(monkeypatch):
+    stream = _ScriptedStream("93.184.216.34", _http_response())
+    backend = _ScriptedBackend(stream, error=httpcore.ConnectError("blocked"))
+    monkeypatch.setattr("src.url_security.httpcore.AnyIOBackend", lambda: backend)
+
+    resolver = AsyncMock(return_value={"93.184.216.34"})
+    with patch("src.url_security._resolve_hostname", new=resolver):
+        async def exercise():
+            async with httpx.AsyncClient() as client:
+                await safe_request(
+                    client,
+                    "POST",
+                    "https://example.com/hook",
+                    headers={"Authorization": "Bearer top-secret"},
+                    content=b"private-payload",
+                )
+
+        with pytest.raises(httpcore.ConnectError, match="blocked"):
+            _run(exercise())
+
+    assert backend.connect_calls == [("93.184.216.34", 443)]
+    assert stream.writes == []
