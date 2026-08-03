@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - audit/public-release-blockers
+      - main
   pull_request:
     branches:
       - main
