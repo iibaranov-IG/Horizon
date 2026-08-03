@@ -132,7 +132,7 @@ def _declared_response_size(response: httpx.Response) -> int | None:
         return None
     try:
         size = int(value)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise UnsafeURLError("Response Content-Length is invalid") from exc
     if size < 0:
         raise UnsafeURLError("Response Content-Length is invalid")
@@ -186,18 +186,25 @@ def _validate_buffered_response_size(response: object, max_response_bytes: int) 
     value = headers.get("content-length") if hasattr(headers, "get") else None
     if value is not None:
         try:
-            if int(value) > max_response_bytes:
-                raise UnsafeURLError(
-                    f"Response exceeds the maximum allowed size of {max_response_bytes} bytes"
-                )
+            declared_size = int(value)
         except (TypeError, ValueError) as exc:
             raise UnsafeURLError("Response Content-Length is invalid") from exc
+        if declared_size > max_response_bytes:
+            raise UnsafeURLError(
+                f"Response exceeds the maximum allowed size of {max_response_bytes} bytes"
+            )
 
     content = getattr(response, "content", b"")
     if isinstance(content, (bytes, bytearray)) and len(content) > max_response_bytes:
         raise UnsafeURLError(
             f"Response exceeds the maximum allowed size of {max_response_bytes} bytes"
         )
+
+
+def _is_real_httpx_async_client(client: object) -> bool:
+    """Recognize the concrete HTTPX client without depending on a patchable symbol."""
+    client_type = type(client)
+    return client_type.__module__.startswith("httpx") and client_type.__name__ == "AsyncClient"
 
 
 async def safe_request(
@@ -222,7 +229,7 @@ async def safe_request(
     for redirect_count in range(max_redirects + 1):
         allowed_addresses = await _validated_public_addresses(current_url)
 
-        if isinstance(client, httpx.AsyncClient):
+        if _is_real_httpx_async_client(client):
             response = await _bounded_real_request(
                 client,
                 current_method,
