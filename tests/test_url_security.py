@@ -8,6 +8,7 @@ import pytest
 
 from src.url_security import (
     UnsafeURLError,
+    _PinnedNetworkBackend,
     _verify_response_peer,
     safe_request,
     validate_public_http_url,
@@ -192,3 +193,30 @@ def test_missing_peer_metadata_fails_closed():
 
     with pytest.raises(UnsafeURLError, match="Could not verify"):
         _verify_response_peer(response, {"93.184.216.34"})
+
+
+def test_pinned_backend_connects_only_to_validated_ip(monkeypatch):
+    calls = []
+
+    class Backend:
+        async def connect_tcp(self, host, port, **kwargs):
+            calls.append((host, port))
+            return object()
+
+    backend = _PinnedNetworkBackend("example.com", 443, "93.184.216.34")
+    monkeypatch.setattr(backend, "_backend", Backend())
+
+    _run(backend.connect_tcp("example.com", 443))
+
+    assert calls == [("93.184.216.34", 443)]
+
+
+def test_pinned_backend_rejects_unexpected_origin_without_dns(monkeypatch):
+    backend = _PinnedNetworkBackend("example.com", 443, "93.184.216.34")
+    connect = AsyncMock()
+    monkeypatch.setattr(backend, "_backend", MagicMock(connect_tcp=connect))
+
+    with pytest.raises(Exception, match="unexpected origin"):
+        _run(backend.connect_tcp("rebound.example", 443))
+
+    connect.assert_not_awaited()
