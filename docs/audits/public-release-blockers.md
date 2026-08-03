@@ -15,6 +15,44 @@ Evidence-driven audit of `iibaranov-IG/Horizon` under the canonical `AUDIT-FIRST
 - Main baseline SHA: `f37ec60a14b3cc5f0f73535b66ed822acef82056`
 - Draft PR: `#1`, `audit/public-release-blockers -> main`
 
+## Final correction — pre-send DNS rebinding blocker
+
+**Status: BLOCKING / NOT REMEDIATED.**
+
+The previous wording that described R-02 as resolved was incorrect. The
+implementation performs `_validated_public_addresses(url)`, then calls
+`client.send(request, stream=True)`, and only afterwards calls
+`_verify_response_peer(response, allowed_addresses)`. HTTPX receives the
+original hostname, so its normal transport performs its own DNS lookup when
+opening the TCP connection. A DNS rebind between those lookups can therefore
+cause request headers and a body to reach a prohibited address before the peer
+metadata is inspected. The peer check is defence in depth after transmission;
+it is not pre-send DNS-rebinding protection.
+
+The deterministic tests currently cover DNS validation, response size, and
+post-connect peer metadata. They do not establish a pinned connection before
+headers/body transmission, and must not be cited as proof of that property.
+
+### Architecture assessment
+
+| Option | Pre-send rebinding protection | TLS SNI / certificate hostname validation | Redirects | Risk |
+| --- | --- | --- | --- | --- |
+| Custom HTTPX/httpcore transport with a pinned backend | Yes in principle | Yes, because the HTTP origin remains the hostname | Per-hop transport required | Depends on HTTPX/httpcore transport internals not exposed by the project contract |
+| Explicit TCP/TLS connection to the selected IP | Yes | Possible, but would require reimplementing HTTP parsing, redirects, response streaming, and timeout semantics | Must be reimplemented | Larger networking-stack replacement |
+| Standard `httpx.AsyncClient` after validation | No | Yes | Yes | Current unsafe behavior |
+
+HTTPX 0.28.1 exposes no supported public request option that pins a TCP peer
+to a validated IP while retaining the original hostname for both HTTP Host
+authority and HTTPS SNI/certificate validation. The first option would require
+constructing a custom `httpcore.AsyncConnectionPool` and injecting a network
+backend; that is an internal integration boundary. The second option exceeds
+the minimal-remediation limit. Therefore no unambiguous, supported minimal
+remediation is available under the audit contract.
+
+The final exact-head SHA, exact-head push CI, and PR merge-ref CI for a future
+real remediation are **PENDING**. Existing runs are evidence only for their
+respective historical commits and do not close this blocker.
+
 ## Current audited state
 
 The two remaining publication blockers identified by the first audit have been remediated:
@@ -100,11 +138,15 @@ bd4f2cef327a29a70d612d9ae723703c5d60361a
 
 **Result:** No unconfirmed personal address remains in the public governance files.
 
-### R-02 — SSRF response size and DNS-to-connection gap
+### B-01 — SSRF DNS-to-connection gap (re-opened)
 
-**State:** The original implementation validated DNS before the request but did not cap a streamed response and did not prove that the connected peer matched the validated address set.
+**State:** The implementation validates DNS before the request and verifies
+peer metadata after the response starts, but it does not pin the TCP connection
+to the validated IP before headers/body are sent.
 
-**Action:** Added bounded streaming, `Content-Length` validation, connected-peer verification through HTTPX network-stream metadata, fail-closed behavior, and deterministic regression tests.
+**Action:** No production change was made during this correction. A
+post-connect peer check and response-size limit remain useful defence in depth,
+but do not remediate DNS rebinding before payload transmission.
 
 **Commits:**
 
@@ -114,7 +156,9 @@ ec63db73cd887775fc50d0f96aef009eb291217b
 01a07c66a006f7e7ab33048f3f8d05eec45aa4e7
 ```
 
-**Result:** Blocking CI passed on the exact production remediation SHA.
+**Result:** `NOT READY`. A supported pinned transport (or an explicitly
+approved networking-contract change) and deterministic transport-boundary
+tests are required before this finding can be resolved.
 
 ### R-03 — `horizon-wizard --help` entered interactive mode
 
@@ -136,10 +180,12 @@ The audit workflow does not claim a full dependency vulnerability scan, lint, fo
 ## Automated release verdict
 
 ```text
-READY CANDIDATE WITH NON-BLOCKING RISKS
+NOT READY
 ```
 
-This is not the final `READY` decision. Human approval must review:
+Publication is blocked until B-01 is remediated with a connection pinned to a
+validated public IP before request headers/body are transmitted. Human approval
+must review:
 
 - the final branch SHA;
 - the diff;
