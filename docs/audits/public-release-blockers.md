@@ -18,11 +18,11 @@ Evidence-driven audit of `iibaranov-IG/Horizon` under the canonical `AUDIT-FIRST
 
 ## Current audited SHA
 
-- Production head evaluated after remediation: `fcd84797fcbd78feb011190aa9b2e7632319e172`
-- PR merge SHA tested by the final observed workflow: `b4a555683488d2bd5d99058e66fcf8ebb8708f6c`
+- Production head evaluated after remediation: `b25e7f7191345aeca8cfb6d46fab1fcf77dad8a4`
+- Exact-head blocking CI: GitHub Actions run `30644200114` (push event)
 - Draft PR: `#1`, `audit/public-release-blockers -> main`
 
-The observed successful PR workflow is not treated as exact-head evidence for `fcd84797...`; this distinction is a stop condition under the contract.
+The blocking workflow was observed on the exact audited branch-head SHA through its `push` trigger. The earlier pull-request merge run remains supplementary evidence only.
 
 ## Evidence
 
@@ -50,11 +50,11 @@ Workflow:
 Observed run:
 
 ```text
-run_id: 30644028493
+run_id: 30644200114
 workflow: Public release audit
-trigger context: pull_request
-PR merge SHA: b4a555683488d2bd5d99058e66fcf8ebb8708f6c
-head included by merge commit: fcd84797fcbd78feb011190aa9b2e7632319e172
+trigger context: push
+head SHA: b25e7f7191345aeca8cfb6d46fab1fcf77dad8a4
+workflow URL: https://github.com/iibaranov-IG/Horizon/actions/runs/30644200114
 ```
 
 Jobs:
@@ -73,17 +73,7 @@ None confirmed during this bounded run.
 
 ## High-priority findings
 
-### H-01 — Exact-head CI evidence is not established
-
-**State:** The final observed successful workflow ran against GitHub's synthetic PR merge commit `b4a555683488d2bd5d99058e66fcf8ebb8708f6c`, not directly against branch head `fcd84797fcbd78feb011190aa9b2e7632319e172`.
-
-**Cause:** Pull-request workflows check out `refs/pull/1/merge`. The available run evidence therefore does not satisfy the contract's strict exact-head SHA rule.
-
-**Action:** No fallback or reinterpretation was applied.
-
-**Result:** Stop condition recorded. A successful push or manually dispatched run must be retrieved and verified against the exact branch-head SHA before a candidate verdict can be issued.
-
-### H-02 — SSRF response-size and DNS-to-connection guarantees are incomplete
+### H-01 — SSRF response-size and DNS-to-connection guarantees are incomplete
 
 **State:** `src/url_security.py` validates URL schemes, rejects embedded credentials, resolves all addresses, rejects non-global targets, and revalidates redirects.
 
@@ -93,7 +83,7 @@ None confirmed during this bounded run.
 
 **Result:** Documented as a release blocker requiring an explicit design decision and regression tests.
 
-### H-03 — Public governance files contain an unconfirmed personal contact
+### H-02 — Public governance files contain an unconfirmed personal contact
 
 **State:** `SECURITY.md` and `CODE_OF_CONDUCT.md` direct reports to `thysrael@gmail.com`.
 
@@ -115,7 +105,17 @@ SMTP, live webhooks, and paid AI-provider calls were not exercised because no li
 
 ## Resolved findings
 
-### R-01 — `horizon-wizard --help` entered interactive mode and failed
+### R-01 — Exact-head CI evidence was not previously recorded
+
+**State:** The earlier report only recorded a successful pull-request merge workflow for the production fix SHA.
+
+**Cause:** GitHub pull-request workflows test a synthetic merge ref, which is not exact-head evidence under the contract.
+
+**Action:** Retrieved and verified the later `push` workflow run `30644200114` bound directly to `b25e7f7191345aeca8cfb6d46fab1fcf77dad8a4`.
+
+**Result:** All three blocking jobs succeeded and uploaded their evidence artifacts. This resolves the exact-head-CI finding for the audited SHA.
+
+### R-02 — `horizon-wizard --help` entered interactive mode and failed
 
 **Initial evidence:** Workflow run `30643891828`, job `Build and clean wheel install`, step `Verify installed package outside checkout`.
 
@@ -154,7 +154,7 @@ Exact command from the job:
 python -m pytest --durations=20
 ```
 
-Observed result on PR merge SHA `b4a555683488d2bd5d99058e66fcf8ebb8708f6c`:
+Observed result on exact push SHA `b25e7f7191345aeca8cfb6d46fab1fcf77dad8a4`:
 
 ```text
 472 passed in 6.45s
@@ -181,7 +181,7 @@ horizon-locales --help
 python -m pip check
 ```
 
-Result: success on PR merge SHA `b4a555683488d2bd5d99058e66fcf8ebb8708f6c`.
+Result: success on exact push SHA `b25e7f7191345aeca8cfb6d46fab1fcf77dad8a4`.
 
 ### Publication hygiene job
 
@@ -227,25 +227,23 @@ Live SMTP: NOT VERIFIED
 Live webhook delivery: NOT VERIFIED
 Paid AI providers: NOT VERIFIED
 Docker release path: NOT VERIFIED / not established as blocking during this run
-Exact-head push CI evidence for fcd84797...: NOT VERIFIED
+Exact-head push CI evidence for b25e7f7...: VERIFIED by run 30644200114
 ```
 
 ## Remaining risks
 
 1. Confirm or replace the public governance contact in `SECURITY.md` and `CODE_OF_CONDUCT.md`.
 2. Decide and implement the SSRF connection-pinning and response-size contract with tests.
-3. Obtain a successful workflow run bound directly to the exact branch-head SHA.
-4. Decide whether dependency vulnerability scanning is required before public publication.
-5. Complete the remaining static contract review for storage, email, provider-chain, and localization edge cases before changing the verdict.
+3. Decide whether dependency vulnerability scanning is required before public publication.
+4. Complete the remaining static contract review for storage, email, provider-chain, and localization edge cases before changing the verdict.
 
 ## Remaining work plan
 
-1. Run or retrieve `Public release audit` on the exact branch-head SHA and record its run ID, jobs, and artifacts.
-2. Human owner confirms the canonical security/conduct contact.
-3. Design review selects one SSRF-safe connection strategy and maximum response-size policy.
-4. Add deterministic security tests before the minimal SSRF remediation.
-5. Re-run every blocking job on the resulting exact SHA.
-6. Update this report and PR body with the new commit-bound evidence.
+1. Human owner confirms the canonical security/conduct contact.
+2. Design review selects one SSRF-safe connection strategy and maximum response-size policy.
+3. Add deterministic security tests before the minimal SSRF remediation.
+4. Re-run every blocking job on the resulting exact SHA.
+5. Update this report and PR body with the new commit-bound evidence.
 
 ## Automated release verdict
 
@@ -255,7 +253,6 @@ NOT READY
 
 Reasons:
 
-- exact-head CI evidence stop condition remains unresolved;
 - public governance contact is unconfirmed;
 - the SSRF acceptance contract is not fully demonstrated;
 - several release-critical integration/security areas remain `NOT VERIFIED`.
