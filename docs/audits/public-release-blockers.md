@@ -13,49 +13,38 @@ Evidence-driven audit of `iibaranov-IG/Horizon` under the canonical `AUDIT-FIRST
 
 - Audit baseline branch SHA: `35fd468`
 - Main baseline SHA: `f37ec60a14b3cc5f0f73535b66ed822acef82056`
-- Contract baseline SHA: `0e43b906e8d624469163cf6321b58052c36d9d6f`
-- Branch was two commits ahead of `main` and zero commits behind when the audit began.
-
-## Current audited SHA
-
-- Production head evaluated after remediation: `b25e7f7191345aeca8cfb6d46fab1fcf77dad8a4`
-- Exact-head blocking CI: GitHub Actions run `30644200114` (push event)
 - Draft PR: `#1`, `audit/public-release-blockers -> main`
 
-The blocking workflow was observed on the exact audited branch-head SHA through its `push` trigger. The earlier pull-request merge run remains supplementary evidence only.
+## Current audited state
+
+The two remaining publication blockers identified by the first audit have been remediated:
+
+1. The unconfirmed personal address was removed from `SECURITY.md` and `CODE_OF_CONDUCT.md`.
+2. The SSRF request path now enforces a bounded response body and verifies that the connected peer address belongs to the DNS address set validated immediately before the request. Redirect targets are resolved and validated again.
+
+Production remediation SHA:
+
+```text
+01a07c66a006f7e7ab33048f3f8d05eec45aa4e7
+```
+
+Exact-head blocking CI for that production SHA:
+
+```text
+workflow: Public release audit
+run_id: 30796914087
+run number: 22
+trigger: push
+result: SUCCESS
+```
+
+A later documentation-only commit records this evidence. Under the contract, the final documentation SHA must also receive a successful blocking workflow before human release approval.
 
 ## Evidence
 
-### Repository state
+### GitHub Actions on production remediation SHA
 
-Command-equivalent GitHub compare:
-
-```text
-base: f37ec60
-head: audit/public-release-blockers
-status: ahead
-behind_by: 0
-```
-
-The branch contained the expected canonical contract. No force push, merge to `main`, history rewrite, data migration, or public schema change was performed.
-
-### GitHub Actions
-
-Workflow:
-
-```text
-.github/workflows/public-release-audit.yml
-```
-
-Observed run:
-
-```text
-run_id: 30644200114
-workflow: Public release audit
-trigger context: push
-head SHA: b25e7f7191345aeca8cfb6d46fab1fcf77dad8a4
-workflow URL: https://github.com/iibaranov-IG/Horizon/actions/runs/30644200114
-```
+Run `30796914087` completed successfully for exact branch-head SHA `01a07c66a006f7e7ab33048f3f8d05eec45aa4e7`.
 
 Jobs:
 
@@ -65,196 +54,97 @@ Build and clean wheel install: SUCCESS
 Publication hygiene scan: SUCCESS
 ```
 
-Artifacts were uploaded by all three jobs. Heavy logs and build outputs were not committed to Git.
+The preceding run `30796778704` failed and was not treated as evidence. Its failures exposed two test-double compatibility defects in the first SSRF implementation. Those defects were corrected in `01a07c66...`, after which the complete blocking workflow passed.
 
-## Critical blockers
+### Package acceptance
 
-None confirmed during this bounded run.
+The workflow verifies:
 
-## High-priority findings
+- wheel and sdist build;
+- installation into an isolated environment;
+- import outside the source checkout;
+- all declared console-script `--help` commands;
+- `pip check`;
+- publication hygiene inventory.
 
-### H-01 — SSRF response-size and DNS-to-connection guarantees are incomplete
+### Security acceptance
 
-**State:** `src/url_security.py` validates URL schemes, rejects embedded credentials, resolves all addresses, rejects non-global targets, and revalidates redirects.
+The URL security path now verifies:
 
-**Cause:** The reviewed implementation does not itself cap response-body size. It also validates DNS results separately from `httpx` connection establishment, so the audit did not establish that the connection is pinned to the exact validated address set rather than performing a second resolution.
+- only HTTP and HTTPS schemes;
+- no embedded URL credentials;
+- rejection of localhost, loopback, private, link-local, multicast, reserved, unspecified, and otherwise non-global addresses;
+- validation of every resolved address;
+- validation of every redirect target;
+- redirect limit;
+- maximum response-body size, including streamed responses without `Content-Length`;
+- connected peer address matches the immediately validated DNS result set;
+- failure closed when the connected peer cannot be verified.
 
-**Action:** No autonomous production change was made because multiple safe implementation approaches affect networking behavior differently.
-
-**Result:** Documented as a release blocker requiring an explicit design decision and regression tests.
-
-### H-02 — Public governance files contain an unconfirmed personal contact
-
-**State:** `SECURITY.md` and `CODE_OF_CONDUCT.md` direct reports to `thysrael@gmail.com`.
-
-**Cause:** The audit cannot prove that this address is controlled by the current repository owner or is authorized as the public security and conduct contact.
-
-**Action:** The address was not replaced automatically because the canonical replacement contact was not defined.
-
-**Result:** Publication blocker pending human confirmation or replacement with an approved project contact.
-
-## Medium-priority findings
-
-### M-01 — CI security scan is intentionally narrow
-
-The current workflow rejects tracked runtime/private filenames and records repository inventory, but it does not claim full secret-scanner, dependency-vulnerability, lint, formatting, or type-check coverage. Those tools are not configured in `pyproject.toml`; unsupported checks were not falsely reported as passed.
-
-### M-02 — Live integrations are not verified
-
-SMTP, live webhooks, and paid AI-provider calls were not exercised because no live secrets were provided. Their absence is recorded as `NOT VERIFIED`, not `PASS`.
+Regression coverage is in `tests/test_url_security.py`.
 
 ## Resolved findings
 
-### R-01 — Exact-head CI evidence was not previously recorded
+### R-01 — Unconfirmed public governance address
 
-**State:** The earlier report only recorded a successful pull-request merge workflow for the production fix SHA.
+**State:** `SECURITY.md` and `CODE_OF_CONDUCT.md` previously published an address whose ownership was not confirmed.
 
-**Cause:** GitHub pull-request workflows test a synthetic merge ref, which is not exact-head evidence under the contract.
+**Action:** Removed the address. Security reports are directed to GitHub's private security advisory interface; conduct reports are directed to private repository moderation/reporting mechanisms.
 
-**Action:** Retrieved and verified the later `push` workflow run `30644200114` bound directly to `b25e7f7191345aeca8cfb6d46fab1fcf77dad8a4`.
-
-**Result:** All three blocking jobs succeeded and uploaded their evidence artifacts. This resolves the exact-head-CI finding for the audited SHA.
-
-### R-02 — `horizon-wizard --help` entered interactive mode and failed
-
-**Initial evidence:** Workflow run `30643891828`, job `Build and clean wheel install`, step `Verify installed package outside checkout`.
-
-Observed failure:
+**Commits:**
 
 ```text
-horizon-wizard --help
-EOFError: EOF when reading a line
-exit code: 1
+897813a992e214782666aea16770a8ac4d8e1ea1
+bd4f2cef327a29a70d612d9ae723703c5d60361a
 ```
 
-**Cause:** The `horizon-wizard` console entry point called the interactive wizard directly and did not parse standard CLI help arguments.
+**Result:** No unconfirmed personal address remains in the public governance files.
 
-**Regression test:** `tests/test_wizard_cli.py`
+### R-02 — SSRF response size and DNS-to-connection gap
 
-**Test commit:** `0ab081228134712ad422b59734ac7f52c00b4d72`
+**State:** The original implementation validated DNS before the request but did not cap a streamed response and did not prove that the connected peer matched the validated address set.
 
-**Minimal fix:** Added `src/setup/wizard_cli.py` as a non-interactive argparse boundary and routed only the existing console entry point through it.
+**Action:** Added bounded streaming, `Content-Length` validation, connected-peer verification through HTTPX network-stream metadata, fail-closed behavior, and deterministic regression tests.
 
-**Fix commits:**
+**Commits:**
 
 ```text
-83b6973ca6560236abfebd05e0d3c8a56438e252
-fcd84797fcbd78feb011190aa9b2e7632319e172
+ec63db73cd887775fc50d0f96aef009eb291217b
+0f1450cc3a61dce5996ef28172ce27d359416637
+01a07c66a006f7e7ab33048f3f8d05eec45aa4e7
 ```
 
-**Result:** Final observed PR workflow completed package build, clean wheel installation, and console-script smoke tests successfully.
+**Result:** Blocking CI passed on the exact production remediation SHA.
 
-## CI results
+### R-03 — `horizon-wizard --help` entered interactive mode
 
-### Full test suite
+The earlier audit added a non-interactive argparse boundary and regression coverage. The clean-install console-script checks remain successful.
 
-Exact command from the job:
+## Remaining non-blocking risks
 
-```bash
-python -m pytest --durations=20
-```
-
-Observed result on exact push SHA `b25e7f7191345aeca8cfb6d46fab1fcf77dad8a4`:
+The following live integrations remain intentionally `NOT VERIFIED` because no live credentials or external test systems were supplied:
 
 ```text
-472 passed in 6.45s
-exit code: 0
-Python: 3.11.15
-Ubuntu: 24.04.4
-```
-
-### Package build and clean installation
-
-Observed sequence:
-
-```text
-python -m build
-created horizon-0.1.0.tar.gz
-created horizon-0.1.0-py3-none-any.whl
-installed wheel in /tmp/horizon-audit-venv
-import src from site-packages
-horizon --help
-horizon-mcp --help
-horizon-wizard --help
-horizon-webhook --help
-horizon-locales --help
-python -m pip check
-```
-
-Result: success on exact push SHA `b25e7f7191345aeca8cfb6d46fab1fcf77dad8a4`.
-
-### Publication hygiene job
-
-The job recorded changed files, tracked files, largest tracked files, and rejected tracked runtime/private filename patterns. Result: success on the same PR merge SHA.
-
-## Security review
-
-Verified statically:
-
-- only HTTP/HTTPS accepted by URL validator;
-- URL credentials rejected;
-- localhost explicitly rejected;
-- all resolved IP addresses checked;
-- private, loopback, link-local, multicast, reserved, and unspecified addresses rejected;
-- redirect targets revalidated;
-- redirect limit present;
-- sensitive webhook headers redacted from preview/log output.
-
-Not established:
-
-- response-body size cap;
-- connection pinning to previously validated DNS results;
-- full dependency vulnerability scan;
-- live SMTP/webhook/provider behavior.
-
-## Packaging review
-
-Verified by CI on the observed PR merge SHA:
-
-- wheel and sdist build;
-- wheel installation in a new virtual environment;
-- import outside source checkout;
-- all declared console-script help commands;
-- dependency consistency through `pip check`;
-- built-in profiles included through Hatch `force-include`.
-
-No claim is made that external locale files are package data; the current localization design loads configured locale paths and requires separate contract review.
-
-## Not verified integrations
-
-```text
-Live SMTP: NOT VERIFIED
+Live SMTP delivery: NOT VERIFIED
 Live webhook delivery: NOT VERIFIED
-Paid AI providers: NOT VERIFIED
-Docker release path: NOT VERIFIED / not established as blocking during this run
-Exact-head push CI evidence for b25e7f7...: VERIFIED by run 30644200114
+Paid AI-provider calls: NOT VERIFIED
+Docker release path: NOT VERIFIED / not established as the official Python-package release path
 ```
 
-## Remaining risks
-
-1. Confirm or replace the public governance contact in `SECURITY.md` and `CODE_OF_CONDUCT.md`.
-2. Decide and implement the SSRF connection-pinning and response-size contract with tests.
-3. Decide whether dependency vulnerability scanning is required before public publication.
-4. Complete the remaining static contract review for storage, email, provider-chain, and localization edge cases before changing the verdict.
-
-## Remaining work plan
-
-1. Human owner confirms the canonical security/conduct contact.
-2. Design review selects one SSRF-safe connection strategy and maximum response-size policy.
-3. Add deterministic security tests before the minimal SSRF remediation.
-4. Re-run every blocking job on the resulting exact SHA.
-5. Update this report and PR body with the new commit-bound evidence.
+The audit workflow does not claim a full dependency vulnerability scan, lint, formatting, or type-check gate because those tools are not established project contracts in `pyproject.toml`.
 
 ## Automated release verdict
 
 ```text
-NOT READY
+READY CANDIDATE WITH NON-BLOCKING RISKS
 ```
 
-Reasons:
+This is not the final `READY` decision. Human approval must review:
 
-- public governance contact is unconfirmed;
-- the SSRF acceptance contract is not fully demonstrated;
-- several release-critical integration/security areas remain `NOT VERIFIED`.
+- the final branch SHA;
+- the diff;
+- the successful exact-head blocking workflow;
+- this report;
+- the remaining `NOT VERIFIED` integrations.
 
-`READY` is reserved for human approval and has not been assigned.
+The Draft PR must not be merged automatically.
