@@ -5,7 +5,7 @@ title: Configuration Guide
 
 # Configuration Guide
 
-Horizon is configured through a `.env` file for secrets, a JSON file for runtime settings, and processing profiles for analysis and enrichment prompts. The JSON file defaults to `data/config.json`; profiles default to `profiles/`.
+Horizon is configured through a `.env` file for secrets, a JSON file for runtime settings, and processing profiles for analysis and enrichment prompts. The JSON file defaults to `data/config.json`; the example configuration points to the repository's `profiles/` directory.
 
 ## Configuration Paths
 
@@ -28,6 +28,21 @@ When both options are present, configuration is loaded from `--config`, while su
 mkdir -p /etc/horizon
 cp data/config.example.json /etc/horizon/config.json
 ```
+
+To use file-based locale packages with that configuration, create the sibling
+directory and copy only the languages you enable:
+
+```bash
+mkdir -p /etc/horizon/locales
+cp data/locales/ru.json /etc/horizon/locales/ru.json
+```
+
+Then add `"locales_dir": "locales"` under `ai` in `/etc/horizon/config.json`.
+
+Relative `ai.locales_dir` and `processing.profiles_dir` values are always
+resolved relative to the active `config.json`, regardless of whether Horizon
+runs through the main CLI, `horizon-locales`, or MCP. For an external config,
+put profiles in `/etc/horizon/profiles` and use `"profiles_dir": "profiles"`.
 
 ## Terminal Icons
 
@@ -60,13 +75,16 @@ automatic matching cannot select a profile:
 ```json
 {
   "processing": {
-    "profiles_dir": "profiles",
+    "profiles_dir": "../profiles",
     "default_profile": "tech-news"
   }
 }
 ```
 
 - `profiles_dir`: Directory containing one subdirectory per processing profile.
+  Relative paths are resolved from the active config file. The `../profiles`
+  value above is appropriate for the default `data/config.json`; an external
+  `/etc/horizon/config.json` with sibling profiles should use `profiles`.
 - `default_profile`: ID of a profile present in `profiles_dir`.
 
 Each profile owns its matching, analysis, filter, and enrichment behavior. See
@@ -286,6 +304,100 @@ By default, AI scoring and enrichment run one item at a time. If your API endpoi
 ```
 
 For OpenAI-compatible gateways, Horizon sends `temperature` by default. If a newer reasoning-style model rejects that parameter with an error such as `temperature is deprecated for this model`, Horizon retries once without it and remembers that capability for later requests.
+
+### Output Languages
+
+Set `ai.languages` to one or more language tags. Horizon creates a localized
+artifact and summary for each configured language. For Russian output, use
+`"ru"`:
+
+```json
+{
+  "ai": {
+    "languages": ["ru"]
+  }
+}
+```
+
+Custom locales are registered in `ai.locales`. Each entry overrides the English
+fallback strings and rendering rules, so adding a new output language does not
+require changing Python code. For larger packages, set `ai.locales_dir` (relative
+to `config.json`) and place one JSON object per language in `ru.json`, `fr.json`,
+and so on. Inline `ai.locales` values override fields from the corresponding file.
+File packages stay the source of truth: a later configuration save preserves
+only the inline overrides, rather than copying all file contents into
+`config.json`. The values below are the minimum useful set:
+
+```json
+{
+  "ai": {
+    "languages": ["fr"],
+    "locales": {
+      "fr": {
+        "header": "Horizon : synthèse quotidienne",
+        "selected_items": "{selected} actualités importantes sélectionnées parmi {total} éléments.",
+        "empty_analyzed": "{total} éléments analysés, aucun n’a atteint le seuil d’importance.",
+        "empty_body": "Aucune actualité importante aujourd’hui.",
+        "overview_instruction": "Les détails seront envoyés dans des messages séparés.",
+        "collapsible_overview_instruction": "Ouvrez les cartes ci-dessous.",
+        "item_prefix": "Actualité {index}/{total}",
+        "date_format": "%d/%m, %H:%M",
+        "discussion": "Discussion",
+        "references": "Références",
+        "tags": "Étiquettes",
+        "unknown_author": "auteur inconnu",
+        "webhook_daily_title": "Horizon {date} — synthèse quotidienne",
+        "webhook_overview_title": "Horizon {date} — aperçu",
+        "webhook_collapsible_title": "Horizon {date} — synthèse"
+      }
+    }
+  }
+}
+```
+
+`pangu_spacing: true` enables spacing between CJK and ASCII text.
+`overview_selected_items` is optional; use it when the compact webhook overview
+needs wording different from `selected_items`. Built-in `en`, `zh`, and `ru`
+packages retain their native date and plural rules.
+
+In `"development"` mode, omitted locale keys use English fallback values, which
+is useful while authoring a package. In `"production"`, a custom language must
+provide the complete package shown above; Horizon rejects incomplete packages
+instead of mixing output languages.
+
+For custom production locales, `date_format` is required. Use numeric
+`strftime` directives such as `%d/%m, %H:%M`, or provide `month_names` with
+exactly twelve names and a format using only `{day}`, `{month}`, and `{time}`.
+Locale-dependent directives such as `%b` and `%B` are rejected in production
+because they can emit English month names.
+
+In `ai.locale_mode: "production"`, Horizon refuses to render a
+custom language with an incomplete locale package, a missing profile display
+name, or a missing localized artifact. It validates every loaded processing
+profile, including profiles which can be selected by `profile: "auto"`. The
+model default is `"development"` for backward compatibility; use
+`"production"` for automated delivery.
+
+Validate the effective configuration before scheduling a run:
+
+```bash
+uv run horizon-locales --config /etc/horizon/config.json
+```
+
+### Adding A Custom Language
+
+1. Add the language tag to `ai.languages` and create its locale JSON file in
+   `ai.locales_dir` (or add the equivalent inline entry).
+2. Add a display name for that language to every profile's `display_names`.
+3. Run `uv run horizon-locales --config /etc/horizon/config.json`.
+4. Preview delivery with `uv run horizon-webhook --config /etc/horizon/config.json --lang fr --dry-run`.
+5. Set `ai.locale_mode` to `"production"` only after the preview is complete.
+
+Locale files are normally the source of truth. Library integrations that
+intentionally need to copy the merged effective package into `config.json` can
+call `StorageManager.save_config(config, save_effective_locales=True)`. This is
+an explicit migration/editing operation: it makes inline values override later
+changes to the locale file.
 
 ## Information Sources
 
@@ -707,9 +819,22 @@ Webhook notification is optional and disabled unless `webhook.enabled` is `true`
 - `platform`: Optional webhook platform hint. Use `generic` by default, or `feishu` / `lark` to enable platform-specific card rendering.
 - `layout`: Controls the message layout. Use `markdown` for templated Markdown delivery, or `collapsible` with `platform: "feishu"` / `"lark"` for a single Feishu Card JSON 2.0 message with each item in a collapsed panel.
 - `fallback_layout`: Reserved fallback layout for unsupported platform/layout combinations. The current safe fallback is `markdown`.
-- `languages`: Optional webhook-only language filter. Use `["zh"]` or `["en"]` to send only selected languages; use `null` or omit it to send all configured `ai.languages`.
+- `languages`: Optional webhook-only language filter. Use `["zh"]`, `["en"]`, or `["ru"]` to send only selected languages; use `null` or omit it to send all configured `ai.languages`.
 - `request_body`: Optional request body. If empty, Horizon sends a `GET` request. If provided, Horizon sends a `POST` request.
 - `headers`: Optional custom headers, one `Key: Value` pair per line.
+
+### Testing A Webhook
+
+Use `horizon-webhook` to render a dry-run or send a test notification. It
+accepts the same configuration-path options as the main CLI:
+
+```bash
+uv run horizon-webhook --config /etc/horizon/config.json --lang ru --dry-run
+uv run horizon-webhook --data-dir /srv/horizon --dry-run
+```
+
+`--lang` defaults to the first configured AI language. `--delivery` can
+temporarily select `summary` or `summary_and_items` without editing the config.
 
 When `request_body` is a JSON object or array, Horizon renders placeholders and serializes it as JSON. When it is a string, Horizon renders it directly and detects JSON if the rendered string is valid JSON.
 
@@ -754,7 +879,7 @@ Available variables:
 | Variable | Description |
 |----------|-------------|
 | `#{date}` | Report date, for example `2026-04-24` |
-| `#{language}` | Language code, such as `en` or `zh` |
+| `#{language}` | Language code, such as `en`, `zh`, or `ru` |
 | `#{important_items}` | Number of items selected by profile filtering |
 | `#{all_items}` | Total number of fetched items |
 | `#{result}` | `success` or `failed` |

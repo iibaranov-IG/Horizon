@@ -28,9 +28,9 @@ from .webhook import WebhookNotifier
 console = Console(stderr=True)
 
 
-def _make_test_items() -> list[ContentItem]:
+def _make_test_items(language: str) -> list[ContentItem]:
     """Create sample ContentItems for the test notification."""
-    return [
+    items = [
         ContentItem(
             id="github:test:1",
             source_type=SourceType.GITHUB,
@@ -68,6 +68,19 @@ def _make_test_items() -> list[ContentItem]:
             ),
         ),
     ]
+    # The connectivity preview must satisfy the same per-language artifact
+    # contract as a real enriched run.  Its wording is illustrative only.
+    for item in items:
+        assert item.processing and item.processing.analysis
+        item.processing.artifacts.setdefault(
+            language,
+            ContentArtifact(
+                language=language,
+                title=item.title,
+                lead=item.processing.analysis.summary,
+            ),
+        )
+    return items
 
 
 def _sample_processing(
@@ -133,11 +146,15 @@ async def _run_test(
     dry_run: bool,
     delivery_override: str | None = None,
     icon_style: IconStyle = "emoji",
+    locales=None,
+    locale_mode: str = "development",
 ) -> None:
     """Execute the webhook test."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    items = _make_test_items()
-    summarizer = DailySummarizer()
+    items = _make_test_items(lang)
+    summarizer = DailySummarizer(
+        locales=locales, strict_locales=locale_mode == "production"
+    )
     summary = await summarizer.generate_summary(items, today, len(items), language=lang)
 
     effective_config = webhook_config
@@ -205,15 +222,21 @@ async def _run_test(
     )
 
 
-def main() -> None:
-    """CLI entry point for horizon-webhook."""
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser for webhook connectivity checks."""
     parser = argparse.ArgumentParser(
         description="Test webhook connectivity and preview rendered content",
     )
     parser.add_argument(
+        "-d", "--data-dir", default="data", help="Directory for Horizon state (default: data)"
+    )
+    parser.add_argument(
+        "-c", "--config", default=None, help="Path to config.json (default: <data-dir>/config.json)"
+    )
+    parser.add_argument(
         "--lang",
         default=None,
-        help="Language to test (en or zh). Defaults to the first language in config.",
+        help="Language code to test, for example en, zh, or ru. Defaults to the first language in config.",
     )
     parser.add_argument(
         "--dry-run",
@@ -226,12 +249,17 @@ def main() -> None:
         choices=["summary", "summary_and_items"],
         help="Override the delivery mode from config for this test.",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> None:
+    """CLI entry point for horizon-webhook."""
+    args = build_parser().parse_args()
 
     try:
         load_dotenv()
 
-        storage = StorageManager(data_dir=str(Path("data")))
+        storage = StorageManager(data_dir=args.data_dir, config_path=args.config)
         try:
             config = storage.load_config()
         except FileNotFoundError:
@@ -259,6 +287,8 @@ def main() -> None:
                 args.dry_run,
                 args.delivery,
                 config.display.icon_style,
+                config.ai.locales,
+                config.ai.locale_mode,
             )
         )
 

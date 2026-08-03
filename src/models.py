@@ -3,8 +3,9 @@
 from datetime import datetime, timezone
 from enum import Enum
 import re
+from string import Formatter
 from typing import Annotated, Literal, Optional, List, Dict, Any, NamedTuple, Union
-from pydantic import BaseModel, ConfigDict, HttpUrl, Field, field_validator
+from pydantic import BaseModel, ConfigDict, HttpUrl, Field, field_validator, model_validator
 
 
 class SourceType(str, Enum):
@@ -131,6 +132,82 @@ class AIProvider(str, Enum):
     OLLAMA = "ollama"
 
 
+def base_language(language: str) -> str:
+    """Return the primary subtag from a validated BCP-47-style language tag."""
+    return re.split(r"[-_]", language, maxsplit=1)[0].lower()
+
+
+class LocaleConfig(BaseModel):
+    """Configurable strings and rendering rules for one output language.
+
+    Values omitted from a custom locale fall back to the English built-in locale.
+    This lets deployments add a language without changing Python source.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    header: Optional[str] = None
+    discussion: Optional[str] = None
+    references: Optional[str] = None
+    tags: Optional[str] = None
+    unknown_author: Optional[str] = None
+    selected_items: Optional[str] = None
+    overview_selected_items: Optional[str] = None
+    empty_analyzed: Optional[str] = None
+    empty_body: Optional[str] = None
+    overview_instruction: Optional[str] = None
+    item_prefix: Optional[str] = None
+    date_format: str = "%b %-d, %H:%M"
+    month_names: Optional[List[str]] = None
+    pangu_spacing: bool = False
+    plural_rule: Optional[Literal["russian"]] = None
+    webhook_daily_title: Optional[str] = None
+    webhook_overview_title: Optional[str] = None
+    webhook_collapsible_title: Optional[str] = None
+    collapsible_overview_instruction: Optional[str] = None
+
+    @field_validator("month_names")
+    @classmethod
+    def validate_month_names(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        if value is not None and (len(value) != 12 or any(not month.strip() for month in value)):
+            raise ValueError("month_names must contain exactly 12 non-empty names")
+        return value
+
+    @model_validator(mode="after")
+    def validate_templates(self) -> "LocaleConfig":
+        allowed_fields = {
+            "selected_items": {"selected", "total"},
+            "overview_selected_items": {"selected", "total"},
+            "empty_analyzed": {"total"},
+            "item_prefix": {"index", "total"},
+            "webhook_daily_title": {"date"},
+            "webhook_overview_title": {"date"},
+            "webhook_collapsible_title": {"date"},
+        }
+        formatter = Formatter()
+        for field_name, allowed in allowed_fields.items():
+            template = getattr(self, field_name)
+            if template is None:
+                continue
+            try:
+                fields = {name for _, name, _, _ in formatter.parse(template) if name}
+            except ValueError as exc:
+                raise ValueError(f"invalid {field_name} template") from exc
+            if not fields <= allowed:
+                raise ValueError(
+                    f"{field_name} may only use: {', '.join(sorted(allowed))}"
+                )
+        has_placeholders = "{" in self.date_format or "}" in self.date_format
+        if has_placeholders and not self.month_names:
+            raise ValueError("date_format placeholders require month_names")
+        if self.month_names:
+            try:
+                self.date_format.format(day=1, month=self.month_names[0], time="00:00")
+            except (KeyError, ValueError, IndexError) as exc:
+                raise ValueError("date_format with month_names may only use {day}, {month}, and {time}") from exc
+        return self
+
+
 # Provider-specific defaults used by setup and provider-chain expansion.
 AI_PROVIDER_DEFAULTS = {
     AIProvider.ANTHROPIC: {
@@ -197,6 +274,9 @@ class AIConfig(BaseModel):
     analysis_concurrency: int = 1
     enrichment_concurrency: int = 1
     languages: List[str] = Field(default_factory=lambda: ["en"])
+    locales: Dict[str, LocaleConfig] = Field(default_factory=dict)
+    locales_dir: Optional[str] = None
+    locale_mode: Literal["production", "development"] = "development"
     # Azure OpenAI specific; required when provider == AZURE
     azure_endpoint_env: Optional[str] = None
     api_version: Optional[str] = None
@@ -210,6 +290,15 @@ class AIConfig(BaseModel):
         if invalid:
             raise ValueError(f"invalid language code: {invalid[0]!r}")
         return languages
+
+    @field_validator("locales")
+    @classmethod
+    def validate_locale_codes(cls, locales: Dict[str, LocaleConfig]) -> Dict[str, LocaleConfig]:
+        language_tag = re.compile(r"^[A-Za-z]{2,8}(?:[-_][A-Za-z0-9]{1,8})*$")
+        invalid = [language for language in locales if not language_tag.fullmatch(language)]
+        if invalid:
+            raise ValueError(f"invalid locale code: {invalid[0]!r}")
+        return locales
 
 
 class GitHubSourceConfig(BaseModel):

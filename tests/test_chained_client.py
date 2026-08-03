@@ -190,6 +190,8 @@ def test_create_chained_client_uses_provider_defaults_without_leaking_base_url()
         analysis_concurrency=3,
         enrichment_concurrency=5,
         languages=["en", "zh-CN"],
+        locales={"fr": {"header": "Horizon France"}},
+        locale_mode="production",
     )
 
     chained = _create_chained_client(config)
@@ -211,6 +213,8 @@ def test_create_chained_client_uses_provider_defaults_without_leaking_base_url()
         assert entry.analysis_concurrency == config.analysis_concurrency
         assert entry.enrichment_concurrency == config.enrichment_concurrency
         assert entry.languages == config.languages
+        assert entry.locales == config.locales
+        assert entry.locale_mode == "production"
 
 
 def test_create_chained_client_preserves_custom_azure_and_common_settings():

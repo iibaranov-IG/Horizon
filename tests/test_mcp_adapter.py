@@ -84,6 +84,22 @@ def test_load_config_expands_env_vars(tmp_path: Path, monkeypatch) -> None:
     assert config.ai.base_url == "https://api.example.com/v1"
 
 
+def test_load_config_loads_locale_files_for_mcp_runtime(tmp_path: Path) -> None:
+    locales_dir = tmp_path / "locales"
+    locales_dir.mkdir()
+    (locales_dir / "fr.json").write_text(json.dumps({"header": "Horizon France"}), encoding="utf-8")
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "ai": {"provider": "openai", "model": "test", "api_key_env": "KEY",
+               "languages": ["fr"], "locales_dir": "locales"},
+        "sources": {},
+    }), encoding="utf-8")
+
+    config = load_config(load_runtime(Path(__file__).resolve().parents[1]), config_path)
+
+    assert config.ai.locales["fr"].header == "Horizon France"
+
+
 def test_apply_source_filter_handles_twitter_and_openbb() -> None:
     config = Config.model_validate(
         {

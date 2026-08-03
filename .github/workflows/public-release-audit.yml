@@ -1,0 +1,150 @@
+name: Public release audit
+
+on:
+  push:
+    branches:
+      - audit/public-release-blockers
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Full test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install project and test dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e '.[dev]'
+      - name: Record environment
+        run: |
+          mkdir -p audit-evidence
+          {
+            echo "commit=${GITHUB_SHA}"
+            python --version
+            python -m pip --version
+            python -m pip freeze
+          } | tee audit-evidence/environment.txt
+      - name: Run complete test suite
+        run: |
+          set -o pipefail
+          python -m pytest --durations=20 2>&1 | tee audit-evidence/pytest.txt
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-release-audit-tests-${{ github.sha }}
+          path: audit-evidence/
+          if-no-files-found: error
+
+  package:
+    name: Build and clean wheel install
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build wheel and sdist
+        run: |
+          mkdir -p audit-evidence
+          python -m pip install --upgrade pip build
+          set -o pipefail
+          python -m build 2>&1 | tee audit-evidence/build.txt
+      - name: Install wheel in isolated environment
+        run: |
+          python -m venv /tmp/horizon-audit-venv
+          /tmp/horizon-audit-venv/bin/python -m pip install --upgrade pip
+          set -o pipefail
+          /tmp/horizon-audit-venv/bin/python -m pip install dist/*.whl 2>&1 | tee audit-evidence/clean-install.txt
+      - name: Verify installed package outside checkout
+        working-directory: /tmp
+        run: |
+          set -o pipefail
+          {
+            /tmp/horizon-audit-venv/bin/python -c 'import src; print(src.__file__)'
+            /tmp/horizon-audit-venv/bin/horizon --help
+            /tmp/horizon-audit-venv/bin/horizon-mcp --help
+            /tmp/horizon-audit-venv/bin/horizon-wizard --help
+            /tmp/horizon-audit-venv/bin/horizon-webhook --help
+            /tmp/horizon-audit-venv/bin/horizon-locales --help
+            /tmp/horizon-audit-venv/bin/python -m pip check
+          } 2>&1 | tee "${GITHUB_WORKSPACE}/audit-evidence/package-smoke.txt"
+      - name: Record package contents
+        run: |
+          set -o pipefail
+          {
+            python - <<'PY'
+          import pathlib
+          import zipfile
+
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          print(f"wheel={wheel.name}")
+          with zipfile.ZipFile(wheel) as archive:
+              for name in sorted(archive.namelist()):
+                  print(name)
+          PY
+          } | tee audit-evidence/wheel-contents.txt
+      - name: Upload package evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-release-audit-package-${{ github.sha }}
+          path: |
+            audit-evidence/
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  publication-scan:
+    name: Publication hygiene scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Record changed files and repository inventory
+        run: |
+          mkdir -p audit-evidence
+          git diff --name-status f37ec60a14b3cc5f0f73535b66ed822acef82056...HEAD | tee audit-evidence/changed-files.txt
+          git ls-files | tee audit-evidence/tracked-files.txt
+          git ls-files -z | xargs -0 -r du -h | sort -h | tail -100 | tee audit-evidence/largest-tracked-files.txt
+      - name: Reject tracked private runtime files
+        run: |
+          python - <<'PY' | tee audit-evidence/private-runtime-files.txt
+          import pathlib
+          import subprocess
+          import sys
+
+          tracked = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
+          forbidden_names = {".env", "config.json", "seen.json", "subscribers.json", "mcp.secrets.json", "mcp-secrets.json"}
+          forbidden_suffixes = {".db", ".sqlite", ".sqlite3", ".log", ".pem", ".key", ".p12", ".pfx"}
+          findings = []
+          for raw in tracked:
+              path = pathlib.PurePosixPath(raw)
+              if path.name in forbidden_names or path.suffix.lower() in forbidden_suffixes:
+                  findings.append(raw)
+          if findings:
+              print("Tracked private/runtime files:")
+              print("\n".join(findings))
+              sys.exit(1)
+          print("No tracked private/runtime filenames detected.")
+          PY
+      - name: Upload publication evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-release-audit-publication-${{ github.sha }}
+          path: audit-evidence/
+          if-no-files-found: error

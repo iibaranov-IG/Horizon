@@ -7,6 +7,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..models import base_language
+
 BUILTIN_PROFILES_DIR = Path(__file__).resolve().parents[1] / "_builtin_profiles"
 
 
@@ -159,6 +161,28 @@ class ProfileRegistry:
         elif isinstance(value, list):
             for child in value:
                 self.validate_source_references(child)
+
+    def validate_output_languages(
+        self, languages: list[str], *, strict: bool, profile_ids: Optional[set[str]] = None
+    ) -> None:
+        """Validate digest headings before collecting or enriching content."""
+        if not strict:
+            return
+        for language in languages:
+            primary_language = base_language(language)
+            if primary_language == "en":
+                continue
+            missing = [
+                profile_id for profile_id, profile in self._profiles.items()
+                if profile_ids is None or profile_id in profile_ids
+                if language not in profile.definition.display_names
+                and primary_language not in profile.definition.display_names
+            ]
+            if missing:
+                raise ValueError(
+                    f"Profiles missing display names for language={language!r}: "
+                    f"{', '.join(sorted(missing))}"
+                )
 
     @property
     def ids(self) -> set[str]:

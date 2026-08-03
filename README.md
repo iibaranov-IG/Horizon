@@ -261,7 +261,7 @@ Minimal manual configuration:
     ]
   },
   "processing": {
-    "profiles_dir": "profiles",
+    "profiles_dir": "../profiles",
     "default_profile": "tech-news"
   }
 }
